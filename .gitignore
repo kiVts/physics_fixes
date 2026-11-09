@@ -1,0 +1,7 @@
+build/
+*.dll
+*.pdb
+*.obj
+settings.ini
+status.ini
+__pycache__/
