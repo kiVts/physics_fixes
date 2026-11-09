@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(physics_fixes LANGUAGES C CXX)
 
-# Needs the SWML SDK repo: cmake -B build -A x64 -DSWML_SDK_DIR=path/to/swml_sdk -DSWML_GAME_DATA_DIR=path/to/generated/headers
+# Needs the SWML repo: cmake -B build -A x64 -DSWML_SDK_DIR=path/to/swml/sdk -DSWML_GAME_DATA_DIR=path/to/generated/headers
 set(SWML_SDK_DIR "" CACHE PATH "SWML SDK folder (the one with SwmlMod.cmake)")
 if(NOT EXISTS "${SWML_SDK_DIR}/SwmlMod.cmake")
   message(FATAL_ERROR "Set SWML_SDK_DIR to the SWML SDK folder")

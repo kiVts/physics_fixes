@@ -5,6 +5,7 @@
 #include "log.h"
 #include "sdk.h"
 #include "vehicle_aero.h"
+#include "sensor_sources.h"
 #include "world.h"
 #include "far_logic.h"
 
@@ -266,7 +267,7 @@ struct Snap {
         const uintptr_t* data;
         uint32_t cap, head, count, pad;
     } hdr{};
-    std::vector<uintptr_t> buf;
+    std::vector<uintptr_t> buf, good; // good: buf without dead sources, only when there are any
 };
 bool g_snap_on = true;
 constexpr int kMaxSnaps = 32;
@@ -275,7 +276,7 @@ int g_nsnaps = 0;
 std::mutex g_snap_mx;
 std::vector<uintptr_t> g_snap_known; // list addresses seen by the scan (guarded by g_snap_mx)
 std::atomic<uint64_t> g_snap_hits{0}, g_snap_misses{0};
-uint64_t g_snap_ticks = 0, g_snap_grown = 0, g_snap_changed = 0, g_snap_logged = 0;
+uint64_t g_snap_ticks = 0, g_snap_grown = 0, g_snap_changed = 0, g_snap_logged = 0, g_snap_dead = 0, g_snap_dead_logged = 0;
 int g_sensor_sink = -1;
 
 bool copy_ring(uintptr_t src, Snap& sn)
@@ -294,6 +295,24 @@ bool copy_ring(uintptr_t src, Snap& sn)
     }
 }
 
+void drop_dead_sources(Snap& sn)
+{
+    size_t dead = 0;
+    for (uintptr_t source : sn.buf) dead += !sensor_source_ok(source);
+    if (!dead) return;
+    sn.good.clear();
+    for (uintptr_t source : sn.buf) {
+        if (sensor_source_ok(source)) {
+            sn.good.push_back(source);
+        } else if (g_snap_dead_logged++ < 20) {
+            swlog("vehicle logic: sensor source %llx in list %llx has a dead character owner; left out of this tick's scan",
+                  static_cast<unsigned long long>(source), static_cast<unsigned long long>(sn.src));
+        }
+    }
+    sn.hdr = {sn.good.data(), std::max(1u, static_cast<uint32_t>(sn.good.size())), 0, static_cast<uint32_t>(sn.good.size()), 0};
+    g_snap_dead += dead;
+}
+
 // Loop thread, before the workers start.
 void snapshot_sensor_lists()
 {
@@ -301,7 +320,7 @@ void snapshot_sensor_lists()
     if (!g_snap_on) return;
     std::lock_guard<std::mutex> lk(g_snap_mx);
     for (uintptr_t a : g_snap_known)
-        if (g_nsnaps < kMaxSnaps && in_world(a) && copy_ring(a, g_snaps[g_nsnaps])) g_nsnaps++;
+        if (g_nsnaps < kMaxSnaps && in_world(a) && copy_ring(a, g_snaps[g_nsnaps])) drop_dead_sources(g_snaps[g_nsnaps++]);
     g_snap_ticks++;
 }
 
@@ -860,9 +879,9 @@ void maybe_log(Mode m)
                   double(g_shared_calls.load()) / t, double(g_upgrades.load()) / t);
             if (g_snap_on)
                 swlog("  sensor lists: %.0f/tick scans ran unlocked on per-tick copies, %.0f/tick locked (list not copied yet); copies"
-                      " checked after the loop: %llu grew (seen next tick), %llu changed otherwise",
+                      " checked after the loop: %llu grew (seen next tick), %llu changed otherwise; %llu dead sources skipped",
                       double(g_snap_hits.exchange(0)) / t, double(g_snap_misses.exchange(0)) / t,
-                      static_cast<unsigned long long>(g_snap_grown), static_cast<unsigned long long>(g_snap_changed));
+                      static_cast<unsigned long long>(g_snap_grown), static_cast<unsigned long long>(g_snap_changed), static_cast<unsigned long long>(g_snap_dead));
             g_snap_grown = g_snap_changed = 0;
             std::vector<int> top;
             for (int i = 0; i < kNumSinks; i++)
