@@ -24,21 +24,6 @@ sensors and the host's own character still collide with it.
 
 0.25.1: exports `swml_local_character` (this PC's own character, for network_fixes' object push).
 
-0.25.0: vehicle requests in parallel (`[serialize] parallel_requests=1`, `parallel_check=8`, host only). A joining
-player asks for every vehicle near it at once and the host wrote them one after another in one tick (2026-10-31: 11
-vehicles x 80-91 ms = a 970 ms freeze for everyone; the joiner then fell 34-43 ticks behind and host pacing slowed the
-world for ~40 s). Now a player's run of vehicle requests is written on the physics pool at the same time (after the
-physics step has finished), and each request hands the game its prepared packed buffer. Offsets and calls are read
-from the live code (both builds checked in `tests/serialize_par_test.cpp`); the first 8, then every 16th, are also
-written the game's way and compared, and any difference switches it off. "serialize: N vehicle requests from one
-player written in parallel" lines.
-
-0.23.0: `[narrowphase] box_contacts=1` (off by default, prototype): box vs capsule / sphere pairs (vehicle blocks vs
-characters' body, feet and sensor capsules) get their contact in closed form, ~0.1 us, instead of GJK + EPA. Depth and
-normal are the exact values GJK / EPA converge to (`tests/box_contact_test.cpp`: 6000 random cases, worst error 3e-14).
-Installed through Bullet's collision-algorithm table, the algorithm objects stay the game's (box_contact.cpp). Untested
-in game: check walking and jumping on vehicles, seats, ladders, swimming next to hulls. "box contacts 5s" lines.
-
 0.22.22: far-physics diagnosis log lines removed (the funnel / candidates lines); multiplayer host line only when peers are connected.
 
 0.22.21: "far vehicle work 5s" probe: logic work of vehicles 0.5 km+ away by why they aren't decimated, and how much of it is idle vehicles.

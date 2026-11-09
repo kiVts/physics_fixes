@@ -1,6 +1,4 @@
 #pragma once
-// Distant AI logic (LOD T2) decisions, kept free of game access so tests can run them (tests/far_logic_test.cpp).
-// vehicle_mt.cpp does the reading and the running; see its "distant AI logic" section.
 #include <algorithm>
 #include <array>
 #include <cstdint>
