@@ -3,7 +3,6 @@
 #include "log.h"
 #include "sdk.h"
 #include "world.h"
-#include "push_step.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -318,24 +317,6 @@ void take_census(const void* world_ptr)
     }
 }
 
-using PushReady_t = int(__cdecl*)();
-PushReady_t g_push_ready = nullptr;
-DWORD g_push_checked = 0;
-int g_push_hz = 180;
-uint64_t g_push_refined = 0, g_push_refined_substeps = 0;
-ULONGLONG g_push_log = 0;
-double client_push_fixed_step(double elapsed, int max_substeps, double native_fixed)
-{
-    DWORD now = GetTickCount();
-    if (!g_push_ready && now-g_push_checked >= 1000) {
-        g_push_checked = now;
-        HMODULE net = GetModuleHandleW(L"network_fixes.dll");
-        if (net) g_push_ready = reinterpret_cast<PushReady_t>(GetProcAddress(net,"swml_client_push_ready"));
-    }
-    return push_step::fixed(native_fixed,elapsed,max_substeps,g_push_hz,
-                            g_push_ready && g_push_ready(),puppet_local_state()==2);
-}
-
 std::atomic<int> g_in_step{0}; // stepSimulation calls running (any scene)
 
 int __fastcall step_detour(void* world, double time_step, int max_sub_steps, double fixed_time_step)
@@ -374,27 +355,17 @@ int __fastcall step_detour(void* world, double time_step, int max_sub_steps, dou
     }
     world_step_begin(world); // vehicle groups for this step (narrowphase "J" pairs)
     puppet_step_begin(world); // client: which characters are puppets this step (puppet_cull.cpp)
-    touch_step_begin(world); // client: what your character touches, for network_fixes (touch_census.cpp)
+    touch_step_begin(world); // client: what your character touches (network_fixes)
     broadphase_step_begin(world);
     box_contacts_step_begin(world); // closed-form box vs capsule / sphere into the dispatcher (box_contact.cpp)
-    double native_fixed = fixed_time_step;
-    fixed_time_step = client_push_fixed_step(time_step,max_sub_steps,fixed_time_step);
-    bool refined = fixed_time_step < native_fixed;
-    if (refined) ++g_push_refined;
+    fixed_time_step = network_fixed_step(time_step, max_sub_steps, fixed_time_step); // client: finer steps while pushing
     far_physics_step_begin(world, time_step, max_sub_steps, fixed_time_step); // after the groups and the players
     uint64_t t0 = __rdtsc();
     character_launch_begin(world,time_step,fixed_time_step);
     int steps = g_orig(world, time_step, max_sub_steps, fixed_time_step);
     character_launch_end(world);
     uint64_t cyc = __rdtsc() - t0;
-    if (refined) g_push_refined_substeps += steps > 0 ? steps : 0;
-    if (!g_push_log) g_push_log = now;
-    if (now-g_push_log >= 5000) {
-        if (g_push_refined) swlog("client push substeps 5s: %llu calls refined from native 60 Hz to %d Hz, %.2f actual substeps/call; elapsed simulation time unchanged",
-                                 (unsigned long long)g_push_refined,g_push_hz,double(g_push_refined_substeps)/g_push_refined);
-        g_push_refined = g_push_refined_substeps = 0; g_push_log = now;
-    }
-    if (steps>0) vehicle_push_step_end(world,fixed_time_step);
+    network_step_end(world, fixed_time_step, steps);
     far_physics_step_end(world, steps, cyc);
     if (steps >= 0) puppet_step_end(); // where each character was left (puppet_cull.cpp)
     sanity_after_step(world);
@@ -410,7 +381,6 @@ bool install()
 {
     // The step hook always runs: it tells the other parts which thread is the physics thread and rebuilds the
     // vehicle groups (parallel solver, broadphase and narrowphase depend on it). enabled=0 only stops the logging.
-    g_push_hz = GetPrivateProfileIntW(L"push",L"client_physics_hz",180,settings_ini());
     g_log = GetPrivateProfileIntW(L"census", L"enabled", 0, settings_ini()) != 0;
     if (!hook_game(kStepSimulation, reinterpret_cast<void*>(&step_detour), reinterpret_cast<void**>(&g_orig))) return false;
     swlog(g_log ? "census: on (\"step 5s\" and \"census 5s\" lines every 5 s)" : "census: step hook on, logging off");

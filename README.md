@@ -1,3 +1,5 @@
+0.26.0: Physics Fixes is performance only now. The wheel spin fix (`[wheels]`) moved to Realistic Aero 0.7.0. The touch census (`[touch]`), the client's 180 Hz push substeps, the vehicle push force and their traces moved to Network Fixes 1.11.0; this mod still calls them from its physics hooks.
+
 0.25.11: early launch: the contact callback and the logic's contact ring drain (zone 0x37) now share a lock. Together they could leave a ring with count != 0 and capacity 0: a divide-by-zero crash on the host (2026-11-08). If the drain isn't found as expected the early launch stays off. "contact rings 30s" lines.
 
 0.25.10: held movable objects are excluded from touch ownership, host steering and pallet snapshots so native pickup has sole control. Physics Fixes includes a read-only 32-call local-character launch history (velocity, forces, facing, held item and contacts), dumped on abnormal walking speeds. This is diagnostic coverage for the reported roller launch, not a verified launch fix.

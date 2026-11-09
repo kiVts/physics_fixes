@@ -17,7 +17,7 @@ FetchContent_Declare(libdeflate GIT_REPOSITORY https://github.com/ebiggers/libde
 FetchContent_MakeAvailable(libdeflate)
 
 swml_add_mod(physics_fixes SOURCES
-  src/touch_census.cpp
+  src/network_hooks.cpp
   src/catchup_skip.cpp
   src/body_contain.cpp
   src/hull_tasks.cpp
@@ -47,7 +47,6 @@ swml_add_mod(physics_fixes SOURCES
   src/phys_pool.cpp
   src/tri_cull.cpp
   src/heat_cache.cpp
-  src/wheel_spin.cpp
   src/puppet_cull.cpp
   src/local_player.cpp
   src/lod.cpp

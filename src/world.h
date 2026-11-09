@@ -43,9 +43,10 @@ bool puppet_ghosts_on();
 // 1 all seated, 2 at least one not seated.
 int puppet_local_state();
 
-// Client, every 8th stepSimulation (census.cpp): the bodies your own character touches, exported to network_fixes'
-// object push as swml_touched_bodies (touch_census.cpp).
+// The multiplayer work inside the physics step, in network_fixes (network_hooks.cpp here calls it).
 void touch_step_begin(const void* world);
+double network_fixed_step(double elapsed, int max_substeps, double native_fixed);
+void network_step_end(const void* world, double fixed, int steps);
 
 // Client catch-up physics skip (catchup_skip.cpp): census.cpp asks before every stepSimulation; true = don't step.
 bool catchup_skip_step(const void* world);
@@ -91,14 +92,12 @@ void far_physics_solver_fallback(); // the solver took the game's own path in th
 bool far_physics_on();
 bool solver_units_mode();           // solver_log.cpp: islands are solved as this mod's units (parallel or serial)
 
-// Temporary pallet contact-to-solver diagnostic (touch_census.cpp).
+// Temporary pallet contact-to-solver diagnostic (network_fixes).
 void touch_solver_begin(const void* world);
 bool touch_solver_native();
 void touch_solver_setup(void* solver, void** bodies, int nb, void** manifolds, int nm);
 void touch_solver_finish(void* solver);
 void touch_solver_end();
-
-void vehicle_push_step_end(const void* world,double fixed_step);
 
 void character_launch_begin(const void* world,double elapsed,double fixed);
 void character_launch_end(const void* world);
