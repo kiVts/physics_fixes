@@ -9,6 +9,7 @@
 #include "sensor_sources.h"
 #include "world.h"
 #include "far_logic.h"
+#include "logic_trace_bridge.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -72,6 +73,21 @@ int g_lod_logic = 0, g_lod_n = 3; // [lod] logic (0 off, 1 on, 2 compare), logic
 double g_lod_far2 = 1200.0 * 1200.0, g_lod_near2 = 1000.0 * 1000.0;
 std::atomic<VehicleAeroObserver> g_aero_observer{nullptr};
 std::atomic<bool> g_aero_observer_ready{false};
+const LogicTraceBridge* g_logic_trace=nullptr; // resolved by the batch owner, stable during worker dispatch
+DWORD g_logic_trace_lookup=0;
+thread_local uint32_t tl_trace_unit=UINT32_MAX;
+
+void trace_batch(uintptr_t list,uint32_t mode, uint32_t reason, uint32_t vehicles, uint32_t units)
+{
+    if (!g_logic_trace && GetTickCount()-g_logic_trace_lookup>=1000) {
+        g_logic_trace_lookup=GetTickCount();
+        HMODULE mod=GetModuleHandleW(L"network_fixes.dll");
+        auto get=mod?reinterpret_cast<GetLogicTraceBridge>(GetProcAddress(mod,"swml_logic_trace_bridge")):nullptr;
+        auto bridge=get?get():nullptr;
+        if (bridge && bridge->version==1 && bridge->size>=sizeof(LogicTraceBridge)) g_logic_trace=bridge;
+    }
+    if (g_logic_trace) g_logic_trace->batch(list,mode,reason,vehicles,units);
+}
 ULONGLONG g_parallel_from = 0; // GetTickCount64 when parallel mode may start (after the grouped warm-up)
 
 // --- the game's calls -----------------------------------------------------------------------------------------
@@ -102,6 +118,8 @@ inline void release_sticky();
 // One vehicle, exactly as the original loop does it (re-reads counts the same way).
 void run_vehicle(uintptr_t entry, uintptr_t veh)
 {
+    const LogicTraceBridge* trace=g_logic_trace;
+    uint32_t trace_order=0;
     VehicleAeroObserver observer = g_aero_observer.load(std::memory_order_acquire);
     if (observer) observer(veh, true);
     const Frame& f = g_f;
@@ -111,15 +129,20 @@ void run_vehicle(uintptr_t entry, uintptr_t veh)
     do {
         uintptr_t body = rd<uintptr_t>(q_at(veh, bi));
         float s30 = rd<float>(q_at(veh + 0x30, bi, 4));
+        if (trace) trace->body(body,1);
         g_body_update(body, f.p12, f.p6, f.p7, f.p11, f.p8, f.list);
+        if (trace) trace->body(body,2);
         release_sticky();
         if (rd<uintptr_t>(body + 0x718)) {
             uint32_t n = rd<uint32_t>(body + 0x460);
             for (uint32_t ci = 0; ci != n; ci++) {
                 uintptr_t comp = rd<uintptr_t>(q_at(body + 0x450, ci));
                 auto tick = rd<Tick_t>(rd<uintptr_t>(comp) + 0x358);
+                if (trace) trace->component(comp,1,tl_trace_unit,trace_order);
                 tick(comp, f.p2, f.p4, f.p6, rd<uintptr_t>(body + 0x718), body + 0x720, s30, f.p5, f.p7, body + 0x14d0, f.p8, body + 0x5d0,
                      rd<uint32_t>(body + 0x264), rd<uint32_t>(body + 0x147c), f.p11, f.p12, f.p13, f.p14, f.p15, f.p9, sa0, sa8, f.p3, f.list, f.p19);
+                if (trace) trace->component(comp,2,tl_trace_unit,trace_order);
+                ++trace_order;
                 release_sticky();
             }
         }
@@ -721,6 +744,7 @@ bool build_units_raw()
 
 void run_unit(Unit& u)
 {
+    tl_trace_unit=u.vehicles.empty()?UINT32_MAX:g_veh[u.vehicles.front()].id;
     if (u.skip && g_job != 0x33) { // distant AI logic decimates zone 0x32 only
         u.cycles = 0;
         return;
@@ -1690,13 +1714,16 @@ extern "C" int __fastcall vl_run(uintptr_t rbp, uintptr_t r13, uintptr_t rdi, ui
         if (!g_parallel_from) g_parallel_from = GetTickCount64() + ULONGLONG(std::max(0, g_grouped_first_s)) * 1000; // first world tick
         if (GetTickCount64() < g_parallel_from) mode = kGrouped;
     }
-    if (mode == kOff || !read_frame_raw(rbp, r13, rdi, r14) || !collect_raw(r13)) {
+    const uint32_t fallback = mode==kOff?1:!read_frame_raw(rbp,r13,rdi,r14)?2:!collect_raw(r13)?3:0;
+    if (fallback) {
+        trace_batch(r13,0,fallback,0,0);
         g_st.original++;
         maybe_log(mode);
         return 0;
     }
     if (static_cast<int>(g_veh.size()) < g_min_vehicles) {
         if (!g_aero_observer.load(std::memory_order_acquire)) {
+            trace_batch(r13,0,4,uint32_t(g_veh.size()),0);
             g_st.original++;
             maybe_log(mode);
             return 0;
@@ -1707,15 +1734,19 @@ extern "C" int __fastcall vl_run(uintptr_t rbp, uintptr_t r13, uintptr_t rdi, ui
     uint64_t t0 = __rdtsc();
     uint32_t list_count = rd<uint32_t>(r13 + 0x330), list_head = rd<uint32_t>(r13 + 0x32c);
     if (mode == kSerial) {
+        trace_batch(r13,1,0,uint32_t(g_veh.size()),uint32_t(g_veh.size()));
+        tl_trace_unit=UINT32_MAX;
         for (const Veh& v : g_veh) run_vehicle(v.entry, v.veh);
         g_st.vehicles += g_veh.size();
     } else {
         uint64_t tg = __rdtsc();
         if (!build_units_raw()) {
+            trace_batch(r13,0,5,uint32_t(g_veh.size()),0);
             g_st.original++;
             return 0;
         }
         g_st.group_cycles += __rdtsc() - tg;
+        trace_batch(r13,uint32_t(mode),0,uint32_t(g_veh.size()),uint32_t(g_units.size()));
         lod_decide_raw();
         lod_publish_physics();
         g_posted.clear();
