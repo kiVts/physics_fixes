@@ -1,7 +1,8 @@
 #pragma once
 
 
-// [parallel] early_launch=1: the physics step runs alongside the logic. Read once at start-up.
+// [parallel] early_launch (1 by default): true once the guard's hooks are all in place, and the physics step then runs
+// alongside the logic.
 bool parallel_on();
 
 // Shared side of the world lock (parallel_guard.cpp): hold it while reading Bullet's broadphase trees or object

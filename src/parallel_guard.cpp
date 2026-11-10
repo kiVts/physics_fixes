@@ -1,4 +1,5 @@
 
+#include "contact_guard.h"
 #include "parallel.h"
 #include "world_lock.h"
 
@@ -37,8 +38,7 @@ bool g_on = false;
 WorldLock g_lock;
 WorldLock::Stats g_lock_stats;
 thread_local int t_exclusive = 0;
-std::atomic<int> g_in_callback{0};
-SRWLOCK g_rings = SRWLOCK_INIT;
+ContactGuard g_guard; // the rings lock and the despawn wait (contact_guard.h)
 std::atomic<uint64_t> g_drains{0}, g_drain_wait{0}, g_drain_wait_max{0}, g_cb_waits{0}, g_cb_wait{0}, g_cb_wait_max{0};
 std::atomic<uint64_t> g_waits{0}, g_wait_cycles{0}, g_wait_max{0}, g_reads{0};
 // lock cost: the physics thread's exclusive holds (readers' and the writer's waits are in g_lock_stats)
@@ -115,12 +115,11 @@ uint64_t __fastcall callback_detour(void* a1, void* a2, void* a3, void* a4)
 {
     // Rings first: a callback still waiting here hasn't loaded any owner, so despawns needn't wait for it.
     uint64_t t0 = __rdtsc();
-    AcquireSRWLockExclusive(&g_rings);
-    add_wait(g_cb_waits, g_cb_wait, g_cb_wait_max, __rdtsc() - t0);
-    g_in_callback.fetch_add(1, std::memory_order_seq_cst);
+    if (g_guard.lock()) add_wait(g_cb_waits, g_cb_wait, g_cb_wait_max, __rdtsc() - t0);
+    g_guard.callback_begin();
     uint64_t r = g_callback(a1, a2, a3, a4);
-    g_in_callback.fetch_sub(1, std::memory_order_release);
-    ReleaseSRWLockExclusive(&g_rings);
+    g_guard.callback_end();
+    g_guard.unlock();
     return r;
 }
 
@@ -128,14 +127,13 @@ uint64_t __fastcall drain_begin(void* a1, void* a2, void* a3, void* a4)
 {
     uint64_t r = g_zone_begin(a1, a2, a3, a4);
     uint64_t t0 = __rdtsc();
-    AcquireSRWLockExclusive(&g_rings);
-    add_wait(g_drains, g_drain_wait, g_drain_wait_max, __rdtsc() - t0);
+    if (g_guard.lock()) add_wait(g_drains, g_drain_wait, g_drain_wait_max, __rdtsc() - t0);
     return r;
 }
 
 uint64_t __fastcall drain_end(void* a1, void* a2, void* a3, void* a4)
 {
-    ReleaseSRWLockExclusive(&g_rings);
+    g_guard.unlock();
     return g_zone_end(a1, a2, a3, a4);
 }
 
@@ -194,13 +192,19 @@ bool point_call_at(uint8_t* site, uint8_t* stub, void* detour)
     return true;
 }
 
+std::atomic<uint64_t> g_stuck_logged{0};
+
 // After an owner pointer was zeroed: wait out a contact callback that may have loaded it.
 void wait_callbacks()
 {
-    std::atomic_thread_fence(std::memory_order_seq_cst); // the zeroing store before the check
-    if (!g_in_callback.load(std::memory_order_acquire)) return;
-    uint64_t t0 = __rdtsc();
-    while (g_in_callback.load(std::memory_order_acquire)) YieldProcessor();
+    const uint64_t t0 = __rdtsc(), started = GetTickCount64();
+    const uint64_t spins = g_guard.wait_callbacks([&](uint64_t) {
+        // A callback never takes this long: say so once, so a new deadlock shows in the log, not only as a frozen game.
+        if (GetTickCount64() - started > 2000 && !g_stuck_logged.exchange(1))
+            swlog("parallel guard: a despawn has waited over 2 s for a contact callback (%d running) on thread %lu: deadlocked?",
+                  g_guard.in_callback.load(), GetCurrentThreadId());
+    });
+    if (!spins) return;
     uint64_t d = __rdtsc() - t0, m = g_wait_max.load();
     g_waits.fetch_add(1);
     g_wait_cycles.fetch_add(d);
@@ -261,15 +265,16 @@ DWORD WINAPI log_loop(void*)
               (unsigned long long)co, (unsigned long long)cot);
         uint64_t dn = g_drains.exchange(0), dw = g_drain_wait.exchange(0), dm = g_drain_wait_max.exchange(0);
         uint64_t cn = g_cb_waits.exchange(0), cw = g_cb_wait.exchange(0), cm = g_cb_wait_max.exchange(0);
-        swlog("contact rings 30s: logic drains %llu, waited %.1f us avg, %.1f us max; callbacks %llu, waited %.1f us avg, %.1f us max",
+        swlog("contact rings 30s: logic drains %llu, waited %.1f us avg, %.1f us max; callbacks %llu, waited %.1f us avg, %.1f us max; "
+              "%llu objects destroyed by a contact callback itself (no wait)",
               (unsigned long long)dn, dn ? dw / cyc_per_us / dn : 0.0, dm / cyc_per_us, (unsigned long long)cn,
-              cn ? cw / cyc_per_us / cn : 0.0, cm / cyc_per_us);
+              cn ? cw / cyc_per_us / cn : 0.0, cm / cyc_per_us, (unsigned long long)g_guard.self_destroys.exchange(0));
     }
 }
 
 bool install()
 {
-    g_on = GetPrivateProfileIntW(L"parallel", L"early_launch", 0, settings_ini()) == 1;
+    g_on = GetPrivateProfileIntW(L"parallel", L"early_launch", 1, settings_ini()) == 1;
     if (!g_on) return true;
     g_cyl_ret = game_live(kCylinderOwnerFreeRet);
     g_zone_begin = game_ptr<Four_t>(kZoneBegin);
