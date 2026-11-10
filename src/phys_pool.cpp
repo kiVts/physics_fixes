@@ -11,6 +11,7 @@
 // exactly those, so a job can't be overwritten while a participant still needs it.
 
 #include "phys_pool.h"
+#include "join_wait.h"
 
 #include "log.h"
 #include "sdk.h"
@@ -75,7 +76,7 @@ void worker_main(int slot)
     }
 }
 
-bool g_started = false;
+std::once_flag g_started;
 
 void start()
 {
@@ -102,10 +103,7 @@ void start()
 
 int phys_pool_threads()
 {
-    if (!g_started) {
-        g_started = true;
-        start();
-    }
+    std::call_once(g_started, start);
     return g_threads;
 }
 
@@ -130,9 +128,6 @@ void phys_pool_run(int helpers, void (*fn)(int slot, void* ctx), void* ctx)
         g_cv.notify_all();
     }
     fn(0, ctx);
-    for (int spins = 0; g_done.load(std::memory_order_acquire) < helpers; spins++) {
-        if (spins < 4000) _mm_pause();
-        else SwitchToThread();
-    }
+    wait_for_workers("physics pool", [helpers] { return g_done.load(std::memory_order_acquire) >= helpers; });
     g_busy.store(false, std::memory_order_release);
 }

@@ -9,7 +9,9 @@ Vanilla does nearly all of its heavy work on about 4 threads: update, physics, r
 - **Render preparation:** building the frame's draw data
 - **Hull and particles:** air and water forces, water rays and particle emitters
 
-It also lets physics run alongside game logic instead of waiting its turn, and replaces some of the game's most expensive loops with faster versions, including the sound mixer, radar messages and vehicle saving.
+Early physics launch is disabled after a stability audit, including when existing settings enable it. Physics and game logic retain their normal ordering; the other parallel phases remain available. This can reduce throughput in heavy worlds. The mod also speeds up the sound mixer, radar messages and vehicle saving.
+
+The stability update fixes hull-ray batch reuse and concurrent body-group writes, synchronizes pool setup, and reports prolonged worker joins through SWML. Worker jobs must still finish before their objects are released. Regression tests pass; live multiplayer soak testing remains pending.
 
 This will likely trigger your antivirus, obviously there is no viruses in here. If a game crashes feel free to make an issue here.
 

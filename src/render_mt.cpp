@@ -2,6 +2,7 @@
 #include "microopt_ab.h"
 
 #include "game.h"
+#include "join_wait.h"
 #include "hooks.h"
 #include "log.h"
 #include "sdk.h"
@@ -698,7 +699,7 @@ extern "C" int __fastcall rp_run(Ctx* c)
     }
     run_participant(g_parts[0]); // the update thread is participant 0
     if (n > 1)
-        while (g_done.load(std::memory_order_acquire) != n - 1) YieldProcessor();
+        wait_for_workers("render prep", [n] { return g_done.load(std::memory_order_acquire) == n - 1; });
 
     uint64_t tm = __rdtsc();
     g_order.clear();

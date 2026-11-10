@@ -1,6 +1,7 @@
 
 #include "contact_guard.h"
 #include "parallel.h"
+#include "stability_policy.h"
 #include "world_lock.h"
 
 #include "hooks.h"
@@ -274,6 +275,7 @@ DWORD WINAPI log_loop(void*)
 
 bool install()
 {
+    if (!kEarlyLaunchAudited) return true; // no dormant locks or partial drain patches in stable mode
     g_on = GetPrivateProfileIntW(L"parallel", L"early_launch", 1, settings_ini()) == 1;
     if (!g_on) return true;
     g_cyl_ret = game_live(kCylinderOwnerFreeRet);

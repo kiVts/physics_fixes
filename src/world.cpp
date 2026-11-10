@@ -113,6 +113,7 @@ void world_step_begin(const void* world_ptr)
         int ia = find(index_of(a)), ib = find(index_of(b));
         if (ia != ib) g_parent[ia] = ib;
     }
+    for (int i = 0; i < static_cast<int>(g_parent.size()); ++i) find(i); // compress before publishing to workers
     if (g_checks > 2000 && g_bad * 10 > g_checks) {
         g_valid = false;
         swlog("vehicle groups: constraint layout didn't check out (%d of %d unreadable); same-vehicle split off", g_bad, g_checks);
@@ -124,7 +125,12 @@ int body_group(const void* obj)
     // read-only during a step: the physics thread and its parallel narrowphase workers may read it
     if (GetCurrentThreadId() != g_owner_thread && !mt_is_worker() && !tl_reader) return -1;
     auto it = g_index.find(obj);
-    return it == g_index.end() ? -1 : find(it->second);
+    if (it == g_index.end()) return -1;
+    // Only the build phase may compress paths. Narrowphase/solver workers share
+    // this snapshot: even identical stores from find() are a C++ data race.
+    int root = it->second;
+    while (g_parent[root] != root) root = g_parent[root];
+    return root;
 }
 
 bool body_groups_valid() { return g_valid; }

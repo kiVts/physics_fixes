@@ -1,5 +1,6 @@
 
 #include "parallel.h"
+#include "stability_policy.h"
 
 #include "hooks.h"
 #include "log.h"
@@ -159,6 +160,10 @@ uint64_t __fastcall logic_detour(void* game, void* sim_rate_src, void* frame, vo
 
 bool install()
 {
+    if (!kEarlyLaunchAudited) {
+        swlog("early launch: disabled by stability audit; native physics/logic order retained (including existing early_launch=1 settings)");
+        return true;
+    }
     g_mode = static_cast<int>(GetPrivateProfileIntW(L"parallel", L"early_launch", 1, settings_ini()));
     if (g_mode <= 0) return true; // lockstep: nothing hooked
     g_pre_step = game_ptr<PreStep_t>(kPreStep);

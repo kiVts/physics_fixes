@@ -1,6 +1,7 @@
 
 #include "hull_rays.h"
 #include "game.h"
+#include "join_wait.h"
 #include "hooks.h"
 #include "log.h"
 #include "sdk.h"
@@ -1732,7 +1733,7 @@ extern "C" int __fastcall vl_run(uintptr_t rbp, uintptr_t r13, uintptr_t rdi, ui
             }
             g_cv.notify_all();
             run_units();
-            while (g_done.load(std::memory_order_acquire) != g_threads) YieldProcessor();
+            wait_for_workers("vehicle logic", [] { return g_done.load(std::memory_order_acquire) == g_threads; });
         }
         tl_par = false;
         check_sensor_lists();
@@ -1891,7 +1892,7 @@ extern "C" int __fastcall vl_run33(uintptr_t rbp, uintptr_t r13)
         }
         g_cv.notify_all();
         run_units();
-        while (g_done.load(std::memory_order_acquire) != g_threads) YieldProcessor();
+        wait_for_workers("vehicle zone 0x33", [] { return g_done.load(std::memory_order_acquire) == g_threads; });
     }
     tl_par = false;
     g_job = 0;

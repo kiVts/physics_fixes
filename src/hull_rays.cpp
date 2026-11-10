@@ -1,5 +1,6 @@
 
 #include "hull_rays.h"
+#include "join_wait.h"
 
 #include "game.h"
 #include "hooks.h"
@@ -27,6 +28,7 @@ struct Job {
     double box[6]; // the caller's 48-byte stack copy
 };
 std::vector<Job> g_jobs;            // filled by the update thread between joins
+std::mutex g_jobs_mu; // claim/copy and batch reset must be one transaction
 std::atomic<int> g_queued{0};       // published job count
 std::atomic<int> g_next{0}, g_done{0};
 std::atomic<bool> g_loop_join{false}, g_task_join{false}, g_on{false};
@@ -39,12 +41,15 @@ std::atomic<uint64_t> g_casts{0}, g_deferred{0}, g_cycles{0}, g_join_wait{0};
 void run_some()
 {
     for (;;) {
-        // claim the next job without ever overshooting: the update thread resets the counters between batches
-        int i = g_next.load(std::memory_order_acquire);
-        if (i >= g_queued.load(std::memory_order_acquire)) return;
-        if (!g_next.compare_exchange_weak(i, i + 1, std::memory_order_acq_rel)) continue;
+        Job j;
+        {
+            std::lock_guard lock(g_jobs_mu);
+            int i = g_next.load(std::memory_order_relaxed);
+            if (i >= g_queued.load(std::memory_order_relaxed)) return;
+            g_next.store(i + 1, std::memory_order_relaxed);
+            j = g_jobs[i]; // never retain a reference across a clear/resize
+        }
         uint64_t t0 = __rdtsc();
-        Job& j = g_jobs[i];
         g_orig(j.sampler, j.ocean, j.box);
         g_cycles.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
         g_done.fetch_add(1, std::memory_order_acq_rel);
@@ -75,12 +80,15 @@ void __fastcall rays_detour(uint8_t* sampler, void* ocean, const double* box)
     int n = g_queued.load(std::memory_order_relaxed);
     if (n == static_cast<int>(g_jobs.capacity())) hull_rays_join(); // never reallocate under running workers
     n = g_queued.load(std::memory_order_relaxed);
-    g_jobs.resize(n + 1);
-    Job& j = g_jobs[n];
-    j.sampler = sampler;
-    j.ocean = ocean;
-    memcpy(j.box, box, sizeof j.box);
-    g_queued.store(n + 1, std::memory_order_release);
+    {
+        std::lock_guard lock(g_jobs_mu);
+        g_jobs.resize(n + 1);
+        Job& j = g_jobs[n];
+        j.sampler = sampler;
+        j.ocean = ocean;
+        memcpy(j.box, box, sizeof j.box);
+        g_queued.store(n + 1, std::memory_order_release);
+    }
     g_deferred.fetch_add(1, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lk(g_mx);
@@ -119,6 +127,7 @@ bool install()
     }
     int threads = static_cast<int>(GetPrivateProfileIntW(L"hull_rays", L"threads", 0, ini.c_str()));
     if (threads <= 0) threads = 3;
+    threads = std::clamp(threads, 1, 16);
     if (!swml()->on_loop(swml_self(), [](void*) {
             // every iteration, not just the first: the first loop event can come from another thread (2026-10-28
             // 21:21, a slow start under memory pressure: the casts then never left the update thread)
@@ -151,6 +160,7 @@ void hull_rays_join()
     if (g_done.load(std::memory_order_acquire) == g_queued.load(std::memory_order_acquire)) {
         // all done: the update thread starts the next batch from empty
         if (GetCurrentThreadId() == g_update_tid && g_queued.load(std::memory_order_relaxed)) {
+            std::lock_guard lock(g_jobs_mu);
             g_queued.store(0, std::memory_order_release); // first: a worker comparing next with queued then stops
             g_next.store(0, std::memory_order_release);
             g_done.store(0, std::memory_order_release);
@@ -160,9 +170,10 @@ void hull_rays_join()
     }
     uint64_t t0 = __rdtsc();
     run_some(); // help
-    while (g_done.load(std::memory_order_acquire) < g_queued.load(std::memory_order_acquire)) YieldProcessor();
+    wait_for_workers("hull rays", [] { return g_done.load(std::memory_order_acquire) >= g_queued.load(std::memory_order_acquire); });
     g_join_wait.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
     if (GetCurrentThreadId() == g_update_tid) {
+        std::lock_guard lock(g_jobs_mu);
         g_queued.store(0, std::memory_order_release);
         g_next.store(0, std::memory_order_release);
         g_done.store(0, std::memory_order_release);
