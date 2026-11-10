@@ -14,6 +14,7 @@ namespace {
 
 constexpr uintptr_t kCatchUp = 0x1408686c0, kIsHost = 0x140ceb6ff;
 constexpr uint32_t kQueueCount = 0xce300;
+constexpr uint32_t kFrontState = 0x350, kSimulation = 0xce190;
 
 using U = uint64_t;
 using CatchUp_t = void(__fastcall*)(U, U, U, U, U);
@@ -21,6 +22,7 @@ CatchUp_t g_orig = nullptr;
 
 bool g_on = false;
 int g_hi = 60, g_lo = 30, g_max_run = 2;
+int g_emergency_skip_ticks = 100;
 const volatile uint8_t* g_is_host = nullptr;
 std::atomic<const uint8_t*> g_game{nullptr};
 std::atomic<bool> g_in_catchup{false};
@@ -75,7 +77,11 @@ bool decide(const void* world)
     }
     puppet_step_begin(world); // fresh: is there a local character, and is it seated
     int local = puppet_local_state();
-    if (local < 0 || local == 2) {
+    uintptr_t front = *reinterpret_cast<const uintptr_t*>(game + kFrontState);
+    uintptr_t sim = *reinterpret_cast<const uintptr_t*>(game + kSimulation);
+    bool in_ui = (front != 0 && sim != 0 && front != sim);
+    bool emergency = (g_emergency_skip_ticks > 0 && queued > uint32_t(g_emergency_skip_ticks));
+    if (local < 0 || (local == 2 && !in_ui && !emergency)) {
         (local < 0 ? g_unknown : g_walking)++;
         g_run = 0;
         maybe_log();
@@ -94,6 +100,7 @@ bool install()
     g_hi = std::clamp(int(GetPrivateProfileIntW(L"catchup", L"behind_ticks", 60, ini)), 15, 10000);
     g_lo = g_hi / 2;
     g_max_run = std::clamp(int(GetPrivateProfileIntW(L"catchup", L"max_skip_in_row", 2, ini)), 1, 9);
+    g_emergency_skip_ticks = std::clamp(int(GetPrivateProfileIntW(L"catchup", L"emergency_skip_ticks", 100, ini)), 0, 10000);
     if (!g_on) {
         swlog("catch-up physics: off in settings.ini");
         return true;
@@ -101,8 +108,8 @@ bool install()
     g_is_host = game_ptr<const volatile uint8_t*>(kIsHost);
     bool ok = hook_game(kCatchUp, reinterpret_cast<void*>(&catchup_detour), reinterpret_cast<void**>(&g_orig));
     swlog("catch-up physics: %s (joining player more than %d ticks behind: skips up to %d of every %d physics steps "
-          "while your character is seated or not spawned yet)",
-          ok ? "on" : "FAILED", g_hi, g_max_run, g_max_run + 1);
+          "while your character is seated, in UI, or not spawned yet; emergency skip over %d ticks)",
+          ok ? "on" : "FAILED", g_hi, g_max_run, g_max_run + 1, g_emergency_skip_ticks);
     if (!ok) g_on = false;
     return true;
 }
