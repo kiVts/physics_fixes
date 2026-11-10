@@ -19,3 +19,9 @@ To use, install [SWML](https://github.com/kiVts/swml) and add the zip from relea
 
 [Rotation Keybinds](https://github.com/kiVts/editor_rotation_rings)
 [Composite Tracer](https://github.com/kiVts/composite_tracer)
+
+Like what I do?
+
+<a href="https://buymeacoffee.com/kivts">
+  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" width="120" alt="Buy Me a Coffee">
+</a>
