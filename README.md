@@ -13,7 +13,7 @@ Early physics launch is disabled after a stability audit, including when existin
 
 The stability update fixes hull-ray batch reuse and concurrent body-group writes, synchronizes pool setup, and reports prolonged worker joins through SWML. Worker jobs must still finish before their objects are released. Regression tests pass; live multiplayer soak testing remains pending.
 
-This will likely trigger your antivirus, obviously there is no viruses in here. If a game crashes feel free to make an issue here.
+This will likely trigger your antivirus, obviously there is no viruses in here. If a game crashes feel free to make an issue here and [join the discord](https://discord.gg/SsT4Y6Y3Zm) so the process to fixing them is quicker.
 
 To use, install [SWML](https://github.com/kiVts/swml) and add the zip from releases here. I also recommend you also install [No Crash Uploads](https://github.com/kiVts/no_crashlog_upload) so you don't upload a crash-report with an injected DLL to Geometa ( And a crash reason overwhelmingly likely to be due to one of these mods). consider other mods as well!
 
