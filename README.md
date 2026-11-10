@@ -25,3 +25,12 @@ Like what I do?
 <a href="https://buymeacoffee.com/kivts">
   <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" width="120" alt="Buy Me a Coffee">
 </a>
+
+## Control-loop diagnostics
+
+For train ECU/logic oscillation, this version supplies read-only scheduling and
+component-update observations to Network Fixes' opt-in control-loop recorder.
+Configure `[logic_trace] enabled=1` in Network Fixes, on host and observers, then
+restart. Use the settings that exhibit the issue; this adapter does not change
+the selected logic mode. Collect `logs/logic_trace_*.jsonl` together with both
+mods' logs. This adds diagnostics; the reported jitter is not yet claimed fixed.
