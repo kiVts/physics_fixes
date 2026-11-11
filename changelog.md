@@ -1,3 +1,5 @@
+0.26.8: Integrated Update Loop Sleep to reduce idle CPU usage without changing tick timing.
+
 0.26.7: adds an optional read-only observer adapter for Network Fixes 1.11.6's control-loop recorder. Reports actual native/serial/grouped/parallel selection and fallback reasons, and surrounds body updates/component ticks with diagnostic notifications. No extra native hook, changed tick arguments or changed default logic mode. Capture is off unless enabled in Network Fixes. This provides evidence for the reported train ECU regression; it is not a claimed jitter fix.
 
 0.26.6: multiplayer workbench and desync catch-up skip. UI screen detection (`front != 0 && sim != 0 && front != sim`) permits skipping Bullet physics sub-steps during multiplayer catch-up even when the player character is unseated (`local == 2`) at a workbench or map screen. Adds an emergency skip threshold (`[catchup] emergency_skip_ticks=100`, default 100), ensuring that when a client falls severely behind (> 100 ticks), expensive Bullet sub-steps are skipped regardless of character seating state to break negative-headroom desync traps in heavy environments.
