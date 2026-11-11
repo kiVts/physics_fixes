@@ -13,7 +13,8 @@ This mod also makes physics and logic run concurrently, but was disabled after a
 
 The stability update fixes hull-ray batch reuse and concurrent body-group writes, synchronizes pool setup, and reports prolonged worker joins through SWML. Worker jobs must still finish before their objects are released. Regression tests pass; live multiplayer soak testing remains pending.
 
-This will likely trigger your antivirus, obviously there is no viruses in here. If a game crashes feel free to make an issue here and [join the discord](https://discord.gg/SsT4Y6Y3Zm) so the process to fixing them is quicker.
+Since SWML 4.5 effort been put to change the way mods are loaded, and should no longer trigger anti-virus by simply existing. 
+This will might trigger your antivirus, obviously there is no viruses in here. If a game crashes feel free to make an issue here and [join the discord](https://discord.gg/SsT4Y6Y3Zm) so the process to fixing them is quicker.
 
 To use, install [SWML](https://github.com/kiVts/swml) and add the zip from releases here. I also recommend you install [No Crash Uploads](https://github.com/kiVts/no_crashlog_upload) so you don't upload a crash-report with an injected DLL to Geometa ( And a crash reason overwhelmingly likely to be due to one of these mods). consider other mods as well!
 
