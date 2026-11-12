@@ -24,6 +24,7 @@ Kind g_kinds[] = {
 };
 constexpr size_t kEventObject = 0x08, kObjOwner = 0xc0, kEventPos = 0x70;
 std::atomic<int> g_logged{0};
+std::atomic<uint64_t> g_unreadable{0};
 std::atomic<uint64_t> g_last_log{0};
 
 bool missing(const Kind& k, void* ev)
@@ -40,7 +41,11 @@ bool missing(const Kind& k, void* ev)
         }
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+        if (g_unreadable.fetch_add(1) == 0) {
+            swlog("event guard: unreadable %s target; original executor suppressed; object ownership fault", k.name);
+            swml_report_fault(swml(), swml_self());
+        }
+        return true;
     }
 }
 
@@ -48,9 +53,9 @@ void maybe_log()
 {
     uint64_t now = GetTickCount64(), last = g_last_log.load(std::memory_order_relaxed);
     if (now - last < 30000 || !g_last_log.compare_exchange_strong(last, now)) return;
-    swlog("event guard 30s: skipped %llu set_transform, %llu kinematic, %llu ghost (object without a Bullet object)",
+    swlog("event guard 30s: skipped %llu set_transform, %llu kinematic, %llu ghost (missing or unreadable target); %llu unreadable probes total",
           (unsigned long long)g_kinds[0].skipped.exchange(0), (unsigned long long)g_kinds[1].skipped.exchange(0),
-          (unsigned long long)g_kinds[2].skipped.exchange(0));
+          (unsigned long long)g_kinds[2].skipped.exchange(0), (unsigned long long)g_unreadable.load());
 }
 
 template <int I> void __fastcall exec(void* ev, void* scene)

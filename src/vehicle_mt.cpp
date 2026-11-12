@@ -10,6 +10,7 @@
 #include "world.h"
 #include "far_logic.h"
 #include "logic_trace_bridge.h"
+#include "resolve.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -63,6 +64,10 @@ const Sink kSinks[] = {
 #include "vehicle_sinks_ported.inc"
 };
 constexpr int kNumSinks = sizeof kSinks / sizeof kSinks[0];
+// [vehicle_logic] isolate_s (see "finding what breaks a vehicle" below): the ray sinks are wrapped although the
+// per-thread ray stack is installed, and take the lock only in the stages that ask for it.
+bool g_sink_is_ray[kNumSinks] = {};
+bool g_iso_lock_rays = false;
 
 uintptr_t live(uintptr_t ghidra_address) { return game_live(ghidra_address); }
 
@@ -471,6 +476,7 @@ uintptr_t sink_arg(const uintptr_t* ret_slot, int n) { return n <= 4 ? ret_slot[
 extern "C" void __fastcall vl_sink_enter(uintptr_t* ret_slot, int sink)
 {
     if (!tl_par || tl_sticky) return; // tl_sticky: the exclusive lock is held until the tick returns already
+    if (g_sink_is_ray[sink] && g_ray_patched && !g_iso_lock_rays) return; // per-thread ray stack: no lock needed
     const Sink& sk = kSinks[sink];
     if (sink == g_sensor_sink && tl_mode == kUnlocked && sensor_scan_unlocked(ret_slot)) return;
     SinkKind kind = sk.kind;
@@ -645,6 +651,35 @@ struct Link {
 };
 uint64_t g_link_unions[3], g_rope_unresolved; // this tick
 std::vector<Link> g_links;
+uintptr_t g_vt_radio = 0;
+bool g_group_radios = true;
+uint64_t g_radio_vehicles = 0; // this tick
+int g_radio_logged = 0;
+constexpr size_t kComponentState = 8;
+uintptr_t g_vt_mc = 0;
+uint64_t g_damaged = 0, g_damaged_mc = 0; // this tick
+
+// --- finding what breaks a vehicle, in one session ([vehicle_logic] isolate_s) -----------------------------------------
+// With isolate_s=N (and mode=parallel) the loop changes every N seconds, by the PC's clock, through the stages below:
+// each adds one thing to the one before. Drive the vehicle that misbehaves and note the time it does: the "ISOLATE"
+// lines in the log say which stage ran then. The stage a fault first appears in names the part responsible.
+struct IsoStage {
+    Mode mode;
+    bool sensor_copies, lock_rays;
+    const char* name;
+};
+const IsoStage kIso[] = {
+    {kOff, false, true, "1/7 the game's own loop (nothing of this mod's)"},
+    {kSerial, false, true, "2/7 this mod's loop on one thread in the game's order, no locks"},
+    {kGrouped, false, true, "3/7 groups one after another on one thread, costliest first, locks on"},
+    {kParallel, false, true, "4/7 several threads; raycasts and sensor scans under the lock"},
+    {kParallel, false, false, "5/7 several threads; raycasts outside the lock"},
+    {kParallel, true, true, "6/7 several threads; sensor scans on per-tick copies outside the lock"},
+    {kParallel, true, false, "7/7 several threads; raycasts and sensor scans outside the lock (the normal setting)"},
+};
+constexpr int kIsoStages = sizeof kIso / sizeof kIso[0];
+int g_isolate_s = 0, g_iso_stage = -1;
+bool g_snap_cfg = true;
 struct Unit {
     std::vector<int> vehicles; // ascending
     int cost;
@@ -671,11 +706,15 @@ void build_units()
     const uintptr_t vt_conn = g_vt_conn, vt_dock = g_vt_dock, vt_rope = g_vt_rope;
     g_links.clear();
     g_parent.resize(g_veh.size());
-    int rope_first = -1;
+    int rope_first = -1, radio_first = -1;
+    const uintptr_t vt_radio = g_group_radios ? g_vt_radio : 0, vt_mc = g_vt_mc;
+    g_radio_vehicles = 0;
+    g_damaged = g_damaged_mc = 0;
     for (int v = 0; v < static_cast<int>(g_veh.size()); v++) {
         g_parent[v] = v;
         uintptr_t veh = g_veh[v].veh;
         int cost = 0;
+        bool radio = false;
         uint32_t nb = rd<uint32_t>(veh + 0x10);
         for (uint32_t bi = 0; bi < nb; bi++) {
             uintptr_t body = rd<uintptr_t>(q_at(veh, bi));
@@ -684,15 +723,30 @@ void build_units()
             for (uint32_t ci = 0; ci < nc; ci++) {
                 uintptr_t comp = rd<uintptr_t>(q_at(body + 0x450, ci));
                 uintptr_t vt = rd<uintptr_t>(comp);
+                if (rd<uint32_t>(comp + kComponentState)) {
+                    g_damaged++;
+                    if (vt == vt_mc) g_damaged_mc++;
+                }
                 if (vt == vt_conn) g_links.push_back(Link{comp, rd<uintptr_t>(comp + kConnectorPartner), v, 0});
                 else if (vt == vt_dock) g_links.push_back(Link{comp, rd<uintptr_t>(comp + kDockPartner), v, 1});
                 else if (vt == vt_rope) {
                     g_links.push_back(Link{comp, rd<uintptr_t>(comp + kRopePartnerA), v, 2});
                     g_links.push_back(Link{comp, rd<uintptr_t>(comp + kRopePartnerB), v, 2});
-                }
+                } else if (vt_radio && vt == vt_radio) radio = true;
             }
         }
         g_veh[v].cost = cost;
+        if (radio) {
+            g_radio_vehicles++;
+            if (radio_first < 0) radio_first = v; // lower indices are initialised: uniting here is safe
+            else unite(radio_first, v);
+        }
+    }
+    if (g_radio_vehicles >= 2 && static_cast<int>(g_radio_vehicles) > g_radio_logged) {
+        g_radio_logged = static_cast<int>(g_radio_vehicles);
+        swlog("vehicle logic: %d vehicles with radio antennas run as one group, in the game's order (a receiver must see what a"
+              " sender wrote the same way every tick)",
+              g_radio_logged);
     }
     std::sort(g_links.begin(), g_links.end(), [](const Link& a, const Link& b) { return a.comp < b.comp; });
     g_link_unions[0] = g_link_unions[1] = g_link_unions[2] = g_rope_unresolved = 0;
@@ -797,7 +851,7 @@ DWORD WINAPI worker_main(void*)
 struct Stats {
     uint64_t ticks = 0, original = 0, cycles = 0, unit_cycles = 0, vehicles = 0, units = 0, largest = 0, group_cycles = 0;
     uint64_t reordered = 0, reorder_ok = 0, reorder_skipped = 0, list_changed = 0;
-    uint64_t unions[3] = {}, rope_unresolved = 0;
+    uint64_t unions[3] = {}, rope_unresolved = 0, radio_vehicles = 0, damaged = 0, damaged_mc = 0;
     uint64_t unprotected[kNumQueues] = {};
     // by distance from your character (local_player.cpp): work and vehicles per ring, in ticks where it was known
     uint64_t ring_cycles[kDistRings] = {}, ring_vehicles[kDistRings] = {}, ring_ticks = 0, ring_unplaced = 0;
@@ -887,9 +941,14 @@ void maybe_log(Mode m)
               g_st.unit_cycles / cyc_ms / t, g_st.group_cycles / cyc_ms / t, double(g_st.vehicles) / t, double(g_st.units) / t, double(g_st.largest) / t);
         if (g_st.mode >= kGrouped)
             swlog("  groups formed by: %.1f connector links, %.1f dock links, %.1f rope links, %.1f rope hooks with an unknown partner (kept"
-                  " together); raycasts %s",
+                  " together), %.1f vehicles with radio antennas (one group); raycasts %s",
                   double(g_st.unions[0]) / t, double(g_st.unions[1]) / t, double(g_st.unions[2]) / t, double(g_st.rope_unresolved) / t,
-                  g_ray_patched ? "in parallel (per-thread ray stack)" : "under the lock");
+                  double(g_st.radio_vehicles) / t,
+                  !g_ray_patched ? "under the lock" : g_iso_lock_rays ? "under the lock (isolate stage)" : "in parallel (per-thread ray stack)");
+        if (g_st.mode >= kGrouped && g_st.damaged)
+            swlog("  damage: %.1f components in a damaged state per tick, %.1f of them microcontrollers (state 1 runs some ticks only and"
+                  " zeroes its outputs on the others)",
+                  double(g_st.damaged) / t, double(g_st.damaged_mc) / t);
         if (g_st.mode >= kGrouped) {
             uint64_t calls = 0, cyc = 0;
             for (int i = 0; i < kNumSinks; i++) calls += g_sink_calls[i].load(), cyc += g_sink_cycles[i].load();
@@ -1714,6 +1773,19 @@ extern "C" int __fastcall vl_run(uintptr_t rbp, uintptr_t r13, uintptr_t rdi, ui
         if (!g_parallel_from) g_parallel_from = GetTickCount64() + ULONGLONG(std::max(0, g_grouped_first_s)) * 1000; // first world tick
         if (GetTickCount64() < g_parallel_from) mode = kGrouped;
     }
+    if (g_isolate_s > 0 && g_mode == kParallel) {
+        FILETIME ft;
+        GetSystemTimeAsFileTime(&ft);
+        const uint64_t secs = ((uint64_t(ft.dwHighDateTime) << 32) | ft.dwLowDateTime) / 10000000ull;
+        const int stage = static_cast<int>((secs / uint64_t(g_isolate_s)) % kIsoStages);
+        if (stage != g_iso_stage) {
+            g_iso_stage = stage;
+            swlog("vehicle logic ISOLATE: now stage %s", kIso[stage].name);
+        }
+        mode = kIso[stage].mode;
+        g_snap_on = g_snap_cfg && kIso[stage].sensor_copies;
+        g_iso_lock_rays = kIso[stage].lock_rays;
+    }
     const uint32_t fallback = mode==kOff?1:!read_frame_raw(rbp,r13,rdi,r14)?2:!collect_raw(r13)?3:0;
     if (fallback) {
         trace_batch(r13,0,fallback,0,0);
@@ -1790,6 +1862,9 @@ extern "C" int __fastcall vl_run(uintptr_t rbp, uintptr_t r13, uintptr_t rdi, ui
         g_st.largest += largest;
         for (int k = 0; k < 3; k++) g_st.unions[k] += g_link_unions[k];
         g_st.rope_unresolved += g_rope_unresolved;
+        g_st.radio_vehicles += g_radio_vehicles;
+        g_st.damaged += g_damaged;
+        g_st.damaged_mc += g_damaged_mc;
         g_units_ready = true;
         g_units_list_count = rd<uint32_t>(r13 + 0x330), g_units_list_head = rd<uint32_t>(r13 + 0x32c);
     }
@@ -2026,7 +2101,15 @@ bool install()
     }
     g_min_vehicles = static_cast<int>(GetPrivateProfileIntW(L"vehicle_logic", L"min_vehicles", 8, ini.c_str()));
     g_reader_lock = GetPrivateProfileIntW(L"vehicle_logic", L"reader_lock", 0, ini.c_str()) != 0;
-    g_snap_on = GetPrivateProfileIntW(L"vehicle_logic", L"snapshot_sensors", 1, ini.c_str()) != 0;
+    g_snap_on = g_snap_cfg = GetPrivateProfileIntW(L"vehicle_logic", L"snapshot_sensors", 1, ini.c_str()) != 0;
+    g_isolate_s = std::clamp(static_cast<int>(GetPrivateProfileIntW(L"vehicle_logic", L"isolate_s", 0, ini.c_str())), 0, 3600);
+    if (g_isolate_s && g_mode != kParallel) g_isolate_s = 0;
+    if (g_isolate_s)
+        swlog("vehicle logic ISOLATE: on, a new stage every %d s by this PC's clock, %d stages (%d s for all of them): the game's own"
+              " loop, this mod's loop on one thread, groups on one thread, then several threads with raycasts / sensor scans"
+              " locked or not. Note the time a vehicle misbehaves; the \"ISOLATE: now stage\" lines say what ran then",
+              g_isolate_s, kIsoStages, g_isolate_s * kIsoStages);
+    g_vt_mc = native_find_vtable("c_scene_vehicle_component_microprocessor");
     for (int i = 0; i < kNumSinks; i++)
         if (kSinks[i].addr == kSensorScan) g_sensor_sink = i;
     InitializeCriticalSectionAndSpinCount(&g_world_cs, kLockSpin);
@@ -2056,6 +2139,18 @@ bool install()
     }
     g_body_update = reinterpret_cast<BodyUpdate_t>(live(kBodyUpdate));
     g_vt_conn = live(kVtConnector), g_vt_dock = live(kVtDoorDock), g_vt_rope = live(kVtRopeHook);
+    g_group_radios = GetPrivateProfileIntW(L"vehicle_logic", L"group_radios", 1, ini.c_str()) != 0;
+    g_vt_radio = native_find_vtable("c_scene_vehicle_component_rx");
+    if (!g_group_radios) {
+        swlog("vehicle logic: vehicles with radio antennas are NOT kept together ([vehicle_logic] group_radios=0): a receiver may"
+              " read a sender on another thread");
+    } else if (!g_vt_radio && g_mode >= kGrouped) {
+        // No way to tell which vehicles talk over radio: units would run them apart. One thread in list order instead.
+        swlog("vehicle logic: the radio antenna class wasn't found on this build; running serial (the game's order on one thread)"
+              " instead of %s",
+              g_mode == kParallel ? "parallel" : "grouped");
+        g_mode = kSerial;
+    }
     g_posted.reserve(8192);
 
     uint8_t* mem = alloc_near(game_base(), 256 * 1024); // ~670 sink stubs of 112 bytes
@@ -2100,7 +2195,11 @@ bool install()
                 gone++;
                 continue;
             }
-            if (g_ray_patched && std::find(std::begin(kRaySinks), std::end(kRaySinks), s.addr) != std::end(kRaySinks)) continue;
+            if (std::find(std::begin(kRaySinks), std::end(kRaySinks), s.addr) != std::end(kRaySinks)) {
+                // normally left alone once the ray stack is per thread; wrapped for isolate_s so a stage can lock them
+                if (g_ray_patched && g_isolate_s <= 0) continue;
+                g_sink_is_ray[i] = true;
+            }
             if (!is_function_start(a)) {
                 skipped++;
                 swlog("vehicle logic: %s%llx %s isn't a function start; not wrapped", s.new_build ? "new:" : "",

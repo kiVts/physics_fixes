@@ -1,3 +1,5 @@
+0.26.9: Implement additional logging and fixes to make multithreading logic safer. Logging is needed to find a fault in some cases of microcontrollers.
+
 0.26.8: Integrated Update Loop Sleep to reduce idle CPU usage without changing tick timing.
 
 0.26.7: adds an optional read-only observer adapter for Network Fixes 1.11.6's control-loop recorder. Reports actual native/serial/grouped/parallel selection and fallback reasons, and surrounds body updates/component ticks with diagnostic notifications. No extra native hook, changed tick arguments or changed default logic mode. Capture is off unless enabled in Network Fixes. This provides evidence for the reported train ECU regression; it is not a claimed jitter fix.

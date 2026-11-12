@@ -53,8 +53,13 @@ struct ContactGuard {
         std::atomic_thread_fence(std::memory_order_seq_cst); // the zeroing store before the check
         uint64_t spins = 0;
         while (in_callback.load(std::memory_order_acquire)) {
-            YieldProcessor();
-            if (!(++spins & 0xffff)) stuck(spins);
+            if (spins < 2048) YieldProcessor();
+            else if (spins < 65536) SwitchToThread();
+            else Sleep(1);
+            ++spins;
+            // Once parked, 65,536 one-ms sleeps would defer diagnostics by over
+            // a minute. Keep the prolonged-wait reporter responsive instead.
+            if (!(spins & (spins < 65536 ? 0xffff : 0xff))) stuck(spins);
         }
         return spins;
     }

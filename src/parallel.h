@@ -1,8 +1,8 @@
 #pragma once
 
 
-// [parallel] early_launch (1 by default): true once the guard's hooks are all in place, and the physics step then runs
-// alongside the logic.
+// False in release builds while the stability-policy gate is closed. If that
+// gate is eventually opened, true only after every companion guard is installed.
 bool parallel_on();
 
 // Shared side of the world lock (parallel_guard.cpp): hold it while reading Bullet's broadphase trees or object
@@ -10,3 +10,8 @@ bool parallel_on();
 // Reads may nest on one thread (world_lock.h counts the depth).
 void world_read_begin();
 void world_read_end();
+
+// The caller must release on the same thread, on normal and exceptional exits,
+// BEFORE waiting for any physics task whose callback may be blocked here.
+bool parallel_phase_begin();
+void parallel_phase_end();
