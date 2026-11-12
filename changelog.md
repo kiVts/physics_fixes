@@ -1,3 +1,5 @@
+0.26.10: Fixed a small issue with multithreading the formula-heavy multicontrollers causing faults in the controller
+
 0.26.9: Implement additional logging and fixes to make multithreading logic safer. Logging is needed to find a fault in some cases of microcontrollers.
 
 0.26.8: Integrated Update Loop Sleep to reduce idle CPU usage without changing tick timing.

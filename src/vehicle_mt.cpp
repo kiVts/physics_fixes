@@ -57,6 +57,7 @@ struct Sink {
     SinkKind kind = kAlways;
     int out_arg = 0; // kReader: 1-based argument it writes through, 0 = none
     bool new_build = false; // addr is the signatures' build's own address (vehicle_sinks_ported.inc), found by game_live_native
+    bool required = false;
 };
 const Sink kSinks[] = {
 #include "vehicle_sinks.inc"
@@ -2192,6 +2193,11 @@ bool install()
             // original-build sinks that a ported build no longer has are replaced in vehicle_sinks_ported.inc
             uintptr_t a = s.new_build ? game_live_native(s.addr) : game_live_if_mapped(s.addr);
             if (!a) {
+                if (s.required) {
+                    swlog("vehicle logic: required %s unavailable; running serial", s.name);
+                    g_mode = kSerial;
+                    break;
+                }
                 gone++;
                 continue;
             }
@@ -2201,6 +2207,11 @@ bool install()
                 g_sink_is_ray[i] = true;
             }
             if (!is_function_start(a)) {
+                if (s.required) {
+                    swlog("vehicle logic: required %s isn't a function start; running serial", s.name);
+                    g_mode = kSerial;
+                    break;
+                }
                 skipped++;
                 swlog("vehicle logic: %s%llx %s isn't a function start; not wrapped", s.new_build ? "new:" : "",
                       static_cast<unsigned long long>(s.addr), s.name);

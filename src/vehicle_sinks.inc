@@ -1,5 +1,7 @@
 
 {0x1400de610, "btCollisionWorld::vfunction8"}, // raycast (shared broadphase ray stack)
+{0x1401e5420, "numeric formula evaluator", kAlways, 0, false, true},
+{0x1401e8fb0, "boolean formula evaluator", kAlways, 0, false, true},
 {0x1401a0560, "mm_physics_ghost_object::mm_physics_ghost_object"}, // physics event
 {0x1401a4300, "btCollisionWorld::RayResultCallback::~RayResultCallback"}, // raycast (shared broadphase ray stack)
 {0x1401a4710, "btCollisionWorld::RayResultCallback::~RayResultCallback"}, // raycast (shared broadphase ray stack)
