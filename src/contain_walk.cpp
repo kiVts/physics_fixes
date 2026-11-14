@@ -76,10 +76,6 @@ uint64_t key(int64_t x, int64_t y, int64_t z)
     return (uint64_t(x & 0x1fffff) << 42) | (uint64_t(y & 0x1fffff) << 21) | uint64_t(z & 0x1fffff);
 }
 
-// One grid per body ring and thread. 2026-10-28 profile (0.22.14-0.22.19): with a single grid per thread, the two
-// patched functions search different rings, so the grid was rebuilt on nearly every search (hash map of ~240 bodies'
-// cells each time): ~1.2 ms per tick on the update thread, more than the walk it saves. Cells: a flat list of
-// (cell key, body index) sorted, looked up by binary search.
 struct Grid {
     const uint8_t* ring = nullptr;
     const void* data = nullptr;

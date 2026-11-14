@@ -545,9 +545,6 @@ void __fastcall near_detour(void* pair, void* dispatcher, const void* info)
         g_recs[tl_rec].push_back(Rec{a, b, pa, pb, sa, sb, key, cycles, count_contacts_raw(pair)});
         return;
     }
-    // Measure one thread at a time: the scene that runs physics changes (main menu scene, then the
-    // world on another thread), so follow another thread once the measured one has gone quiet for
-    // 1 s, or when other threads make far more calls than it (two scenes stepping at once).
     DWORD tid = GetCurrentThreadId();
     ULONGLONG now = GetTickCount64();
     if (tid != g_thread) {

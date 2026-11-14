@@ -118,9 +118,6 @@ Ctx g_main;
 uintptr_t g_lo = 0, g_list = 0, g_evq = 0;
 bool g_main_participates = true;
 
-// Load balance. Vehicles are assigned to participants before the loop, heaviest first to the least loaded, from the
-// time each took last tick (longest-processing-time rule); vehicles without a measurement are claimed by whoever
-// reaches them first. Read-only while the participants run.
 std::unordered_map<uintptr_t, double> g_cost;  // entry -> smoothed cycles
 std::unordered_map<uintptr_t, int> g_owner;    // entry -> participant, this run
 std::atomic<uint64_t> g_go_tsc{0};
@@ -146,8 +143,6 @@ HANDLE g_ser_heap = nullptr;   // the serializer's heap (serialize.cpp), also in
 std::atomic<bool> g_free_hook_live{false};
 thread_local HANDLE tl_heap = nullptr; // set while a participant draws (parallel mode, free hook live)
 std::atomic<uint64_t> g_arena_allocs{0};
-// [heap] update_pool=1 (off by default: no gain in the 2026-10-30 A/B, render prep +0.16 ms): the update thread's other small _aligned_malloc blocks (strings, rings, events, Bullet's update-
-// thread temporaries: 2026-10-30 profile, RtlAllocateHeap + RtlFreeHeap ~6% of the update thread) come from its slab pool
 bool g_upd_pool = false;
 thread_local bool tl_upd = false; // set on the update thread by the loop callback once the free hook is live
 std::atomic<uint64_t> g_upd_allocs{0}, g_upd_fallback{0};
@@ -176,15 +171,6 @@ ArenaHdr* arena_hdr(const void* p)
     return nullptr;
 }
 
-// --- the serializer's small-block pool --------------------------------------------------------------------------
-// The XML writer makes one short-lived string per attribute. HeapAlloc spends most of its time in RtlAllocateHeap's
-// slow path on them, a private heap included (2026-10-20 20:46: still 37% of the writer). Blocks up to the largest
-// class (header included) come from 64 KB slabs of one size class each: a free list per slab, the partly used slabs
-// listed per class, and an empty slab given back to Windows unless it is its class's last one.
-// One pool per thread: the update thread (spawns, saves), the main thread (the vehicle editor writes the vehicle) and
-// the save thread all write, sometimes at once; with one shared lock, 20:55's spawn spent a third of the writer in
-// SRW lock acquire / release. A slab remembers its pool, so a block freed on another thread goes back to its own pool
-// (that pool's lock, uncontended in the common case). Pool blocks carry the arena header with heap = kPoolMarker.
 constexpr size_t kSlabSize = 64 * 1024; // = VirtualAlloc's granularity, so a block's slab is its address & ~0xffff
 constexpr uint32_t kSlabHdr = 64;
 constexpr uint32_t kClassSize[] = {48,  64,  80,  96,  112, 128,  160,  192,  224,  256,  320,  384,

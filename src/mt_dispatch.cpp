@@ -103,7 +103,6 @@ void run_chunks()
 
 std::vector<int> g_par, g_ser;
 
-// Per dispatch: cycles each slot spent on pairs (the rest of the dispatch's wall time it waited or wasn't woken yet).
 constexpr int kSlots = 17;
 uint64_t g_busy[kSlots] = {}, g_busy_sum[kSlots] = {}, g_busy_max = 0, g_split_cycles = 0, g_job_cycles = 0;
 

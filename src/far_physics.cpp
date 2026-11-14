@@ -75,7 +75,6 @@ uint64_t g_tick = 0;               // ticks with a step (physics thread)
 struct Stats {
     uint64_t ticks = 0, active = 0, groups = 0, bodies = 0, refused[far_logic::kRefusalCount] = {}, overlap = 0, released = 0;
     uint64_t mixed = 0, no_cand = 0, n_not3 = 0, ab_off = 0, id_mismatch = 0;
-    // funnel (2026-10-28: held in 0% with nothing refused): where a tick with candidates stops
     uint64_t f_cands = 0, f_no_host = 0, f_gate = 0, f_scan = 0, f_objs = 0, f_compounds = 0, f_matched = 0, f_cand_groups = 0,
              f_ok_groups = 0, f_split = 0, f_no_pairs = 0, f_all_dropped = 0, f_held_empty = 0;
     std::atomic<uint64_t> pairs_skipped{0}, release_events{0};
@@ -83,12 +82,11 @@ struct Stats {
     uint64_t chk_near = 0, chk_player = 0;
 } g_st;
 ULONGLONG g_log_at = 0;
-// A/B totals of the physics step time (cycles), per state
 struct Ab {
     uint64_t steps = 0, cycles = 0;
 } g_ab[2];
 int g_ab_state = -1;
-double g_cyc_per_ms = 0; // cycle counter rate, measured at install
+double g_cyc_per_ms = 0;
 
 template <typename T> T rd(const void* p, size_t off) { return *reinterpret_cast<const T*>(static_cast<const uint8_t*>(p) + off); }
 

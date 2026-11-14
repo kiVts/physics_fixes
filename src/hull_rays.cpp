@@ -129,8 +129,6 @@ bool install()
     if (threads <= 0) threads = 3;
     threads = std::clamp(threads, 1, 16);
     if (!swml()->on_loop(swml_self(), [](void*) {
-            // every iteration, not just the first: the first loop event can come from another thread (2026-10-28
-            // 21:21, a slow start under memory pressure: the casts then never left the update thread)
             DWORD tid = GetCurrentThreadId();
             if (g_update_tid != tid) {
                 hull_rays_join(); // anything queued under the old id

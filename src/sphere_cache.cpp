@@ -117,10 +117,6 @@ uint8_t __fastcall test_detour(const uint8_t* q, const double* p, float* value, 
         float v;
         uint32_t cl;
         if (g_orig(q, p, &v, &cl)) {
-            // The body may be moving under us (another thread placing / moving it: 2026-10-28, three times within
-            // seconds of a world load). Judge it only on a body that holds still: sphere, the game's test, sphere
-            // again. Two different spheres = it moved during the check (counted). The same sphere, the game hitting
-            // and the sphere rejecting = the cache really is wrong for this body: off.
             Slot a = *s, b = *s;
             sphere(q, a);
             bool hit = g_orig(q, p, &v, &cl) != 0;
@@ -163,7 +159,7 @@ DWORD WINAPI log_loop(void*)
 bool install()
 {
     std::wstring ini = settings_ini();
-    if (!GetPrivateProfileIntW(L"contain", L"sphere_cache", 0, ini.c_str())) { // off by default: measured no gain (2026-10-28)
+    if (!GetPrivateProfileIntW(L"contain", L"sphere_cache", 0, ini.c_str())) {
         swlog("sphere cache: off ([contain] sphere_cache=1 to try it; measured no gain, see RENDER_PREP_NEXT.md)");
         return true;
     }

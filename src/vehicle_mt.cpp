@@ -231,12 +231,6 @@ bool eligible(uintptr_t entry, uintptr_t* veh)
     return true;
 }
 
-// --- sink wrappers ------------------------------------------------------------------------------------------
-// Default: one critical section, every caller exclusive (spins 4000 times before sleeping: most holds are short).
-// [vehicle_logic] reader_lock=1: an SRW lock that readers (kReader) share. SRW locks aren't recursive and can't be
-// upgraded, so each thread keeps its own mode and count; a reader that calls something needing the exclusive
-// lock gives up its shared hold and waits for the exclusive one (counted: "upgrades"). Test 2026-10-20 15:46:
-// 0 upgrades but 3.8-3.9 ms/tick vs 2.95 with the critical section (SRW didn't spin then; it does now).
 CRITICAL_SECTION g_world_cs;
 SRWLOCK g_world_lock = SRWLOCK_INIT;
 bool g_reader_lock = false;
@@ -261,7 +255,7 @@ thread_local int tl_sticky_sink = 0;
 uint8_t* g_post_stub = nullptr;
 void* g_tramps[kNumSinks];
 uintptr_t g_world_lo = 0, g_world_hi = 0; // the world object (set per tick in read_frame)
-constexpr uintptr_t kWorldFromList = 0x16a68, kWorldSize = 845799; // tracer run 2026-10-20 13:45
+constexpr uintptr_t kWorldFromList = 0x16a68, kWorldSize = 845799;
 
 std::atomic<uint64_t> g_sink_calls[kNumSinks], g_sink_cycles[kNumSinks], g_sticky_by_sink[kNumSinks], g_sticky_n_by_sink[kNumSinks], g_upgrades_by_sink[kNumSinks];
 std::atomic<uint64_t> g_wait_cycles{0}, g_overflow{0}, g_sticky_holds{0}, g_sticky_cycles{0}, g_cond_free{0}, g_shared_calls{0}, g_upgrades{0};
@@ -1062,15 +1056,8 @@ struct FarVeh {
     std::vector<uint8_t> stash;
 };
 constexpr uint64_t kUnsafeTicks = 600;
-// A/B (logic=3): T2 on for 30 s, off for 30 s, all session; running totals per state (0 off, 1 on) to measure the gain
-// in one world: tick period (ticks/s), vehicle-logic loop wall time and its thread time.
 constexpr uint64_t kAbPeriod = 1800;
 
-// Multiplayer. Every phase, compare window and A/B window runs on the host tick and units are keyed by their smallest
-// vehicle id, so the same ship runs on the same ticks on every PC. The host decides which vehicles are eligible and
-// publishes that set (network_fixes sends it to every peer that runs this, ~10/s); a client decimates exactly the host's
-// set, and nothing without a fresh one. The host decimates only while every connected peer runs it (network_fixes'
-// report), or, without a report, while no remote player is in the world.
 constexpr uintptr_t kIsHost = 0x140ceb6ff; // byte: 1 host / single player, 0 client
 std::atomic<int> g_net_connected{0}, g_net_capable{0};
 std::atomic<uint32_t> g_net_report_at{0};
@@ -1340,7 +1327,6 @@ void lod_decide()
 // tick that has no player seat and is untainted, with its vehicle id and whether an NPC crews it. Far physics holds
 // crewed ones, and uncrewed ones only as parts joined to a crewed one since loading. Published every tick (empty too).
 std::vector<far_logic::Cand> g_far_cands;
-// Why vehicles of decimated units don't become candidates (counters only; the 2026-10-28 diagnosis that used them is done).
 struct PubStats {
     uint64_t calls = 0, size_mismatch = 0, units = 0, vehicles = 0, no_rec = 0, player = 0, tainted = 0, no_body = 0,
              bodies = 0, faults = 0;
@@ -1519,10 +1505,6 @@ std::string event_class(uintptr_t vt)
     return at == std::string::npos ? n : n.substr(0, at);
 }
 
-// Far vehicle work probe (2026-10-28, scoping a far-vehicle logic LOD beyond AI crews): every vehicle 0.5 km or more
-// from the nearest player, by why it isn't decimated (first rule it fails), with the logic work it cost this tick (its
-// unit's time split evenly over the unit's vehicles), and for the ones outside AI groups whether they looked idle:
-// first body's speed under 0.2 m/s and no physics events posted this tick. "far vehicle work 5s" lines.
 enum FarClass { kFcDecimatedRun, kFcSkipped, kFcControl, kFcTainted, kFcPlayer, kFcNotAi, kFcHigh, kFcNear, kFcUnsafe, kFcOther, kFcN };
 const char* const kFcNames[kFcN] = {"decimated (ran)", "decimated (skipped)", "compare control", "tainted (player was near)",
                                     "player seat", "no AI crew / group", "not at sea level", "inside far_m", "kept full (event)", "other"};

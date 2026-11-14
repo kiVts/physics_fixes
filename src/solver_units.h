@@ -1,12 +1,3 @@
-// Parallel solver units (solver_log.cpp): merges units that reference the same dynamic body.
-//
-// The units are built from the islands Bullet's island manager hands to processIsland, and islands share no dynamic
-// body, so neither should the units. On a client in multiplayer they did on nearly every step (friend's client
-// 2026-10-27: 200+ bodies per step, each listed by two islands), and every such step went back to the game's
-// single-threaded path. Instead the units that share a body are merged into one (union-find over units), and each
-// merged unit keeps every body, manifold and constraint once: Bullet's setup applies a body's forces once per entry
-// in the body list, so a body listed twice in one solveGroup would get gravity twice. Units without a shared body
-// keep running in parallel.
 #pragma once
 
 #include <cstddef>
@@ -16,7 +7,6 @@
 
 namespace solver_units {
 
-// Accessors the merge needs (game memory in solver_log.cpp, fakes in the test).
 struct Access {
     bool (*is_dynamic)(const void* obj);
     const void* (*man_body0)(const void* manifold);

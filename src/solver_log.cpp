@@ -186,7 +186,7 @@ int g_threads = 1;             // solver threads including the physics thread
 constexpr int kMaxSlots = 16;
 bool g_active = false;     // inside a recorded / managed solveConstraints
 bool g_in_process = false; // inside processIslands (batch flushes there are part of it)
-bool g_split_now = false;  // this step runs with batch size 1 (measurement)
+bool g_split_now = false;
 bool g_collect = false;    // processIsland collects islands instead of solving them
 bool g_own_islands = true;
 uint64_t g_own_steps = 0, g_own_checked = 0, g_own_fallback = 0;
@@ -251,8 +251,6 @@ const uint8_t* read_ptr(const void* base, size_t off)
 
 int manifold_count(const uint8_t* m) { return m ? read_int(m, kManCount) : 0; }
 
-// --- measured solveGroup (any thread) ---------------------------------------------------------------------------
-// Records the unit into this slot's list. islands = how many islands the call holds.
 double run_unit(int slot, int islands, void* solver, void** bodies, int nbodies, void** manifolds, int nmanifolds,
                 void** constraints, int nconstraints, void* info, void* debug, void* dispatcher)
 {
@@ -640,11 +638,6 @@ bool solve_collected(void* cb)
     g_next.store(0, std::memory_order_relaxed);
 
     uint64_t t0 = __rdtsc();
-    // A body shared by two units would be solved twice, each time with only its unit's constraints: not what the
-    // game computes (2026-10-22 17:48: shared bodies via hinges on almost every step near ships, then a character and a
-    // vehicle went to 1e9..1e13 m in one tick, NaN 4 ticks later). Such a step goes back to the game's own path.
-    // Units that share a dynamic body (seen on clients: the same body handed over in two islands) are merged into one
-    // unit with each body / manifold / constraint once (solver_units.h); the check below then still has to pass.
     static const solver_units::Access access{
         [](const void* o) { return is_dynamic(static_cast<const uint8_t*>(o)); },
         [](const void* m) -> const void* { return read_ptr(static_cast<const uint8_t*>(m), kManBody0); },
@@ -652,8 +645,6 @@ bool solve_collected(void* cb)
         [](const void* c) -> const void* { return read_ptr(static_cast<const uint8_t*>(c), kConA); },
         [](const void* c) -> const void* { return read_ptr(static_cast<const uint8_t*>(c), kConB); }};
     size_t units_before = g_order.size();
-    // The merge builds a hash map over every body reference (0.46 ms per sub-step on the host's AI-ship world, where
-    // nothing is ever shared): only when the fast check (open addressing, quiet) finds a shared body.
     solver_units::MergeStats ms;
     uint64_t nulls = 0;
     bool clean = units_disjoint(g_order, false, &nulls);
@@ -1027,11 +1018,6 @@ bool collect_island(void* cb, void** bodies, int nbodies, void** manifolds, int 
 {
     Island is{g_body_buf.size(), nbodies, g_man_buf.size(), 0, nullptr, 0, 0, false, island};
     g_body_buf.insert(g_body_buf.end(), bodies, bodies + nbodies);
-    // Only manifolds with contact points go to the solver (2026-10-27 host, AI ships: 9140 manifolds per sub-step, 8037
-    // of them vehicle-static and 95% of those empty). An empty one makes no rows: solveGroup's setup only gets the solver
-    // entries of its two bodies, which an island's dynamic bodies already have (setup initialises every listed body
-    // first) and a static body shares as the fixed body, so the solve is the same; the copying, the shared-body check
-    // and the setup walk get much shorter. A kinematic body touched only by an empty manifold no longer counts below.
     for (int i = 0; i < nmanifolds; i++)
         if (manifold_count(static_cast<const uint8_t*>(manifolds[i])) > 0) g_man_buf.push_back(manifolds[i]);
     is.nmanifolds = static_cast<int>(g_man_buf.size() - is.man_off);

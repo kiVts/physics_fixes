@@ -1,152 +1,129 @@
-0.26.10: Fixed a small issue with multithreading the formula-heavy multicontrollers causing faults in the controller
+0.26.12: Fix seabed memory leaks and audio profiler freezes.
 
-0.26.9: Implement additional logging and fixes to make multithreading logic safer. Logging is needed to find a fault in some cases of microcontrollers.
+0.26.11: Prevent audio profiler freezes and excessive memory usage.
 
-0.26.8: Integrated Update Loop Sleep to reduce idle CPU usage without changing tick timing.
+0.26.10: Fix microcontroller formula faults during parallel vehicle logic.
 
-0.26.7: adds an optional read-only observer adapter for Network Fixes 1.11.6's control-loop recorder. Reports actual native/serial/grouped/parallel selection and fallback reasons, and surrounds body updates/component ticks with diagnostic notifications. No extra native hook, changed tick arguments or changed default logic mode. Capture is off unless enabled in Network Fixes. This provides evidence for the reported train ECU regression; it is not a claimed jitter fix.
+0.26.9: Improve parallel vehicle logic stability and optional logging.
 
-0.26.6: multiplayer workbench and desync catch-up skip. UI screen detection (`front != 0 && sim != 0 && front != sim`) permits skipping Bullet physics sub-steps during multiplayer catch-up even when the player character is unseated (`local == 2`) at a workbench or map screen. Adds an emergency skip threshold (`[catchup] emergency_skip_ticks=100`, default 100), ensuring that when a client falls severely behind (> 100 ticks), expensive Bullet sub-steps are skipped regardless of character seating state to break negative-headroom desync traps in heavy environments.
+0.26.8: Reduce idle CPU usage without changing simulation timing.
 
-0.26.5: stability audit. Early physics launch is disabled, including when an existing settings.ini enables it: impact callbacks and despawns still share state with game logic outside the existing guards. Other parallel phases remain available. Hull-ray workers now claim copied jobs atomically with batch reset, and body-group lookups no longer write shared data from worker threads. Pool initialization is synchronized. Long joins yield CPU and report a fault after two seconds; they still wait for native jobs to finish so their pointers cannot outlive the caller. This release trades early-launch throughput for safer scheduling; multiplayer soak testing is still required.
+0.26.7: Add optional vehicle logic performance monitoring.
 
-0.26.4: the early launch (`[parallel] early_launch`, physics stepping alongside the logic) is a setting again and now on by default. An existing settings.ini keeps its own value: one with `early_launch=0` stays off, and one without the line gets the new default, on. If the guard that makes it safe can't be placed on a game build, it stays off by itself.
+0.26.6: Improve multiplayer catch-up while using workbenches and maps.
 
-0.26.2: with the early launch on, logic and physics no longer freeze for good when a contact breaks or despawns something (2026-11-09). The contact callback itself destroyed an object, and the despawn guard then waited for every running callback, its own included. The logic then waited behind it on the contact ring lock. A thread inside a callback now skips the wait, because no other callback can be running while it holds the ring lock, which is now also reentrant. A wait over 2 s is logged ("deadlocked?"), and "contact rings 30s" counts the destroys made from inside a callback.
+0.26.5: Improve worker scheduling stability and disable early physics launch.
 
-0.26.1: a sensor source whose character owner has gone no longer crashes the vehicle logic (2026-11-09): it's left out of that tick's sensor scan and logged ("has a dead character owner", "dead sources skipped" in the sensor lists line).
+0.26.4: Make early physics launch configurable.
 
-0.26.0: Physics Fixes is performance only now. The wheel spin fix (`[wheels]`) moved to Realistic Aero 0.7.0. The touch census (`[touch]`), the client's 180 Hz push substeps, the vehicle push force and their traces moved to Network Fixes 1.11.0; this mod still calls them from its physics hooks.
+0.26.2: Prevent freezes when contact callbacks destroy objects.
 
-0.25.11: early launch: the contact callback and the logic's contact ring drain (zone 0x37) now share a lock. Together they could leave a ring with count != 0 and capacity 0: a divide-by-zero crash on the host (2026-11-08). If the drain isn't found as expected the early launch stays off. "contact rings 30s" lines.
+0.26.1: Prevent crashes from removed character sensors.
 
-0.25.10: held movable objects are excluded from touch ownership, host steering and pallet snapshots so native pickup has sole control. Physics Fixes includes a read-only 32-call local-character launch history (velocity, forces, facing, held item and contacts), dumped on abnormal walking speeds. This is diagnostic coverage for the reported roller launch, not a verified launch fix.
+0.26.0: Move wheel adjustments and multiplayer pushing to their dedicated mods.
 
-0.25.9: large vehicles retain host authority. The client relays its solved horizontal contact reaction (normal plus friction) for unowned vehicle bodies; the host applies a bounded force at the contact point. No vehicle-size ownership limit is raised. Forces expire after 150 ms, total at most 1500 N per player, and require a nearby remote character and a point within the host body AABB. [push] large_vehicles=0 disables the relay in Network Fixes.
+0.25.11: Prevent crashes while draining contact events.
 
-0.25.8: compatible multiplayer pushing enables host-like 180 Hz collision substeps while the client walks. Native client physics otherwise hard-codes 60 Hz even when the host and UI use 180 Hz. Elapsed time is unchanged. Physics setting [push] client_physics_hz=0 disables refinement. Original GJK and native solver A/B tests did not prevent sinking; analytic contacts and parallel solver are restored.
+0.25.10: Preserve native control of held objects.
 
-0.25.7 diagnostic: traces actual pallet contact rows and vertical impulses. On a client, if a watched pallet sinks 15 cm, subsequent steps use the untouched native solver for a within-session A/B test. [touch] solver_ab=0 disables the automatic switch.
+0.25.9: Improve multiplayer pushing of large vehicles.
 
-0.25.6: movable prop boxes use Bullet's native GJK contact witnesses/manifold handling. Oracle logs compare
-analytic depth, normal and witness points. Support diagnostics now separate response contacts from sensor overlaps.
+0.25.8: Improve client collision accuracy during multiplayer pushing.
 
-0.25.5: [touch] support_audit=1 logs actual contact counts, upward support, penetration depth, velocity and filters
-for recently touched dynamic bodies on both PCs. Diagnostic only; no forces or contact points are changed.
+0.25.7: Add optional multiplayer contact monitoring.
 
-0.25.3: client touch census (`[touch] census=1`): about 8 times a second the bodies your character touches, exported as
-`swml_touched_bodies` for network_fixes 1.9.2's object push log. Log only.
+0.25.6: Use native contact handling for movable objects.
 
-0.25.2: host: remote players' characters skip collisions with dynamic bodies (`[puppets] host_cull=1`). The host
-teleports each remote character as a driven body, an immovable wall to Bullet: it shoved pallets and small vehicles away
-and into the ground the moment a client touched them, and fought the steering of objects a client pushes itself. Ground,
-sensors and the host's own character still collide with it.
+0.25.5: Add optional object support monitoring.
 
-0.25.1: exports `swml_local_character` (this PC's own character, for network_fixes' object push).
+0.25.3: Add optional character contact monitoring.
 
-0.22.22: far-physics diagnosis log lines removed (the funnel / candidates lines); multiplayer host line only when peers are connected.
+0.25.2: Prevent remote characters from shoving dynamic objects on hosts.
 
-0.22.21: "far vehicle work 5s" probe: logic work of vehicles 0.5 km+ away by why they aren't decimated, and how much of it is idle vehicles.
-0.22.20: contain walk: one grid per body ring and thread, flat sorted cells (the single grid was rebuilt on nearly every search: ~1.2 ms per tick); "contain walk 5s" shows grid builds and search time.
-0.22.19: solver: own island walk (counting sort of the manifolds by island instead of the game's quicksort; checked against the game's walk every 64 sub-steps; [solver] own_islands=1, "own island walk" line).
-0.22.18: integrateTransforms on the physics pool when no body can take Bullet's CCD path ([lod] parallel_integrate=1, "integrate 5s" lines).
-0.22.17: far physics funnel: groups that passed the hold rule, pair cache unreadable, all dropped for overlaps, nothing to hold (0.22.16: ~10 crewed groups per tick passed the rule, nothing refused, nothing held).
-0.22.16: far physics diagnosis: "far candidates 5s" (vehicle_mt: why decimated vehicles are not published) and a "far physics funnel" line (where a tick with candidates stops); broadphase: prefetch proxies ahead of the ordered setAabb calls.
-0.22.15: hull rays: follow the update thread's id every loop iteration (0.22.14's test: the first loop event came from
-another thread and no cast was deferred all session).
+0.25.1: Share local character information with compatible mods.
 
-0.22.13: [lod] parallel_predict: Bullet's predictUnconstraintMotion (damping + predicted transform per body, ~0.19 ms per
-tick serial) runs on the physics pool; per-body work only, same result. Needs far physics on ([lod] physics), which hooks it.
+0.25.0: Prepare joining players’ vehicle data in parallel.
 
-0.22.12: sphere cache off by default ([contain] sphere_cache=1 turns it on): correct, but no gain measured (the containment
-test's cost is its call count on bodies already in the CPU cache).
+0.24.0: Preserve local character collisions on moving vehicles.
 
-0.22.11: sphere cache: the self-check read the containment test's whole rax as its answer; the test returns a bool in al
-(the miss path leaves rax's upper bits set). Every 'cache off' so far was that, not a wrong rejection.
+0.23.0: Add optional faster character collision handling.
 
-0.22.10: sphere cache self-check: a hit only counts against the cache on a body that holds still over the check (sphere,
-the game's test, sphere again); 0.22.9 still switched off on a body moved 1.4 km right after a world load.
+0.22.22: Reduce unnecessary performance logging.
 
-0.22.9: sphere cache: a self-check hit is judged against the body as it is now (a body placed / moved by another thread
-between the decision and the check, 19.3 km right after a world load twice, no longer switches the cache off).
+0.22.21: Add optional distant vehicle performance logging.
 
-0.22.7: sphere cache: switched itself off in the first test (a body 19 km from its cached sphere within one tick).
-Each use now checks the body's translation and re-reads the sphere when it changed; rotation is covered by adding twice the
-sphere's local offset to the limit (margin default 1 m). Contact skip measured: 0.70 -> 0.34 ms per tick.
+0.22.20: Speed up vehicle body containment searches.
 
-0.22.5: fixes 0.22.4 failing to start on the 2026-10-28 build (radar msgs read a jump-table entry whose address was computed before
-translation; the whole mod stopped, logic fell to ~10 fps). Vehicle logic's shared-system wrappers on that build: the
-original lists map through the port table, plus vehicle_sinks_ported.inc (tools/port_sinks.py, 19 functions in the new build's
-addresses: event constructors that were rebuilt, the new events such as ocean wave params, the weapon tick and its writer).
-The SDK now runs each part's install guarded: an unmapped address or a crash switches that part off, not the mod.
+0.22.19: Speed up physics island grouping.
 
-0.22.1: far physics after its first run (2026-10-28 23:57): nothing was held, every crewed AI ship group was refused as
-"joined to something else" (an AI ship is several vehicles joined by physics joints). Uncrewed vehicles now count as
-joined parts when they are in the distant-AI-logic set, untainted, and have been joined to a crewed one every time they
-were seen loaded (after a 2 s grace); seen alone once, never again this session (by vehicle id). A new line names what
-refused groups are joined to. Self-checks stayed at 0 in that run.
+0.22.18: Update eligible body transforms in parallel.
 
-0.20.3: `[lod] logic=3` A/B mode to measure the gain in one session: distant AI logic on for 30 s, off for 30 s, and a
-`distant AI logic A/B since start` line with running totals per state: ticks/s (tick period), the vehicle-logic loop's
-wall time and its thread time per tick, vehicles skipped. Copies are dropped while off.
+0.22.17: Improve optional distant physics monitoring.
 
-0.20.2: distant AI logic, after the second compare run (22:44, run_logs/20261027_solo_0201_t2_groups): AI groups worked
-(28 crewed + ~60 group vehicles, up to 25 skipped per tick; far ring ~18% less work per vehicle), but the same ships were
-~15% slower while decimated (3.9 vs 4.6 m/s over the session), and decimated units also posted event_set_impulse_threshold
-(~16%), event_set_transform and event_set_constraint_hinge_set_frames (~7% each) that were not repeated. Now both
-impulse kinds are copied and replayed (0x30 / 0x38 bytes, variable-size stash); motor power, collision flags and damping
-hold by themselves; any other event type, or a force on another vehicle's body, keeps that vehicle at full logic for 10 s
-(`kept at full logic` line, with the reasons).
+0.22.16: Improve distant physics monitoring and broadphase performance.
 
-0.20.1: distant AI logic, after the first compare run (2026-10-27 22:38, run_logs/20261027_solo_0200_t2_compare): 0 faults,
-0 dropped copies, ~140 impulses replayed per tick, but only 23 of 90 vehicles were AI-crewed (~5 skipped per tick of 67
-at 1-2 km), and the decimated half averaged 6.5 m/s against 11 m/s for the control half (different ships, so not
-conclusive). Now: an uncrewed vehicle without a player seat within 80 m of an AI-crewed one counts as part of its AI
-group; compare mode alternates each unit between decimated and full every 30 s, so both speeds come from the same ships;
-a new line lists the physics event types decimated units post on their run ticks (to see whether thrust also uses
-events other than event_set_impulse).
+0.22.15: Correct deferred water-ray scheduling.
 
-0.18.2: two more for the AI-crew world. `[broadphase] parallel_aabbs=1`: the ~4100 objects' boxes in updateAabbs (0.42 ms
-per physics sub-step, all on the physics thread) are computed on the physics pool and handed to the broadphase in the
-game's order, the same calls with the same values; every 64th sub-step they are computed again on the physics thread
-and must match bit for bit, else that part goes back to the game's loop. `[hull_tasks] keep_ring=1`: a body's hull
-force list keeps its memory between ticks instead of being freed by the update thread (~1.3% of it in RtlFreeHeap) and
-grown again by the task every tick. The 2026-10-27 18:23 run with 8 pool threads instead of 6 was no faster: each
-thread got slower and the vehicle logic's lock waits doubled (2.6 -> 5.0 ms per tick of thread time).
+0.22.14: Speed up nearby vehicle containment checks.
 
-0.17.2: `parallel 5s:` gets a second line splitting a parallel narrowphase dispatch: sorting out soft-body pairs (serial),
-the pool run, the time each thread actually spends on pairs, the busiest thread.
+0.22.13: Predict eligible body motion in parallel.
 
-0.15.0: catch-up physics skip (`[catchup]`, joining players only). When your game is far behind the host (more
-than 60 ticks queued, e.g. right after joining), it replays the queued ticks with the physics step skipped for 2 of
-every 3: everything except your own character follows the host's positions anyway, and events and vehicle logic still
-run for every tick, so it catches up faster. Only while your character is seated or not spawned yet (a walking
-character on a moving deck could be left behind). `catch-up physics 10s:` in physics_fixes.log. `skip_physics=0` turns it off.
+0.22.12: Disable sphere caching by default.
 
-0.14.1: a puppet's sensor ghosts now hold no contacts instead of their last ones. Before, a ghost whose contact list
-was ever filled (any step the cull couldn't run) kept it for good, including pointers to the objects it touched, which
-could be gone later. With the cull on from the start the list was empty anyway, so nothing visible changes.
+0.22.10: Improve sphere caching when bodies move.
 
-0.13.7: advanced wheels keep 0.9999 of their spin per tick instead of the game's 0.99 (`[wheels]`). The game's loss
-acted as a drag proportional to speed (45 kN at 31 m/s on a 10 t aircraft); it is now 1 % of that. Braking is
-unchanged. Moved here from Realistic Aero 0.5.1 (aircraft only there), now for every vehicle.
+0.22.9: Improve sphere caching during world loading.
 
-# Physics Fixes (prototype)
+0.22.8: Cast hull water rays in parallel.
 
-0.13.0 adds an optional vehicle begin/end observer for Realistic Aero's VLM batching. With no observer,
-the usual minimum-vehicle fallback is unchanged. With an observer, small scenes use the serial vehicle
-loop so even one aircraft gets a complete batch; additional workers are not woken for those scenes.
+0.22.7: Refresh cached bounds after body movement.
 
-0.12.1: fixes the shared inventory-mesh reference-count race exposed by parallel render preparation.
-The complete mesh assign/release operation is serialized across callers. Parallel prep stays off if
-that hook cannot be installed. Offline concurrency checks pass; in-game crash validation is pending.
+0.22.6: Reduce containment checks and empty contact processing.
 
-- `measure=1` (default): every 5 s, `physics_fixes.log` gets a `narrowphase 5s:` block with the time Bullet
-  spends per pair class, e.g. `G:capsule-D:compound` = character sensor ghost vs vehicle body.
-- `skip_ghost_pairs=1`: the near callback returns early for pairs that involve a ghost object.
-  Ghosts are `CF_NO_CONTACT_RESPONSE`, so the solver never used those contacts; the ghost's own
-  overlap list is maintained by the broadphase and is unaffected.
+0.22.5: Restore compatibility after the game update.
 
-Check with `skip_ghost_pairs=1` before turning it on for good: sitting in / leaving seats, ladders,
-interact prompts near vehicles, swimming and entering water. Fixed address: build 0x6a9a9e20 only.
-`multiplayer=local`: it doesn't change the simulation, each PC can run it or not.
+0.22.4: Support the updated game build.
+
+0.22.3: Add optional performance profiling.
+
+0.22.2: Keep connected seats and doors with distant vehicles.
+
+0.22.1: Improve distant vehicle grouping.
+
+0.22.0: Add optional reduced-frequency physics for distant AI ships.
+
+0.21.0: Synchronize distant AI scheduling between multiplayer peers.
+
+0.20.3: Add optional distant AI performance comparison.
+
+0.20.2: Preserve forces when reducing distant AI updates.
+
+0.20.1: Improve distant AI group detection.
+
+0.20.0: Add optional reduced-frequency logic for distant AI vehicles.
+
+0.19.0: Reduce unnecessary collisions for distant seated NPCs.
+
+0.18.4: Add optional vehicle distance performance logging.
+
+0.18.3: Update particle emitters in parallel.
+
+0.18.2: Compute physics bounds in parallel and reuse hull buffers.
+
+0.18.1: Correct parallel hull task scheduling.
+
+0.18.0: Process hull forces across multiple threads.
+
+0.17.2: Improve optional collision performance logging.
+
+0.15.0: Accelerate multiplayer catch-up while seated or spawning.
+
+0.14.1: Clear stale remote character sensor contacts.
+
+0.14.0: Skip unnecessary remote character collision work.
+
+0.13.7: Reduce passive wheel resistance while preserving braking.
+
+0.13.0: Support compatible vehicle batching from Realistic Aero.
+
+0.12.1: Prevent shared mesh reference races during parallel rendering.

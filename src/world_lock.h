@@ -1,20 +1,4 @@
 #pragma once
-// The world lock between the physics step's writers and the logic's readers (parallel_guard.cpp).
-//
-// The physics thread takes it in ~450k short pieces per second (one per setAabb, ~0.1 us each); readers (rays, sphere
-// queries) hold it ~10 us. With an SRW lock a reader that found it held waited ~45 us on average and up to 2.5 ms
-// (2026-10-30 00:49: 56-63 ms/s blocked in total): woken after one release, it lost the lock again to the physics
-// thread's next acquire, and again, until the burst of setAabb calls ended.
-//
-// Here the writer gives way: before each acquire, if a reader is waiting, it lets the waiting readers in first (they
-// enter while the writer flag is clear) and only then raises the flag and waits for the readers inside to leave. A
-// reader waits for at most the hold in progress plus the readers already inside; the writer waits for those readers
-// instead (the physics step has slack while the update thread is the critical path). Readers and the writer spin
-// (pause, then SwitchToThread): every wait is short, and a sleeping reader costs ~10-50 us to wake.
-//
-// Dekker on seq_cst atomics: the writer stores its flag then reads the reader count; a reader increments the count
-// then reads the flag. At least one of them sees the other, so they never both proceed.
-// Readers may nest on one thread (depth counted). Writers nest through their own counter in parallel_guard.cpp.
 #include <windows.h>
 #include <intrin.h>
 #include <atomic>

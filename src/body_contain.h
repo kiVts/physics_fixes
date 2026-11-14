@@ -1,11 +1,3 @@
-// Zone 0x30 ("which body is this body inside", body_contain.cpp): the selection, with the game memory behind
-// accessors so the test can drive it with fake bodies.
-//
-// The game's loop, per body a (in list order): a.found = none, best = 0xffffffff; then for every body b in list
-// order, b != a: skip unless a.id < b.id < best; if test(b, a.point) hits, a takes b's result and best = b.id.
-// test() rejects any point farther than twice b's radius from b's centre, so b only has to be tried when a's point is
-// inside b's sphere of radius 2r: a uniform grid over those spheres (with a margin) gives a superset of the hits, and
-// walking the candidates in list order makes the same choice as the full walk, including ties.
 #pragma once
 
 #include <algorithm>
@@ -17,7 +9,7 @@
 namespace body_contain {
 
 struct Body {
-    const void* p;  // game body (or a fake one)
+    const void* p;
     uint32_t id;
     double point[3];
     double centre[3]; // b's sphere centre, as test() computes it

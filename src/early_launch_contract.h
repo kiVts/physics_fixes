@@ -23,9 +23,6 @@ inline bool async_mode(const uint8_t* code,size_t size) {
     const uint8_t expected[]={0x41,0x80,0xbf,0x68,0x0a,0,0,0};
     return size>=sizeof expected && !std::memcmp(code,expected,sizeof expected);
 }
-// Exact native instruction forms, not an entry signature standing in for field
-// validation. The caller supplies the mapped gate-return and submit-return
-// boundaries and the resolved submit target. Reject unfamiliar compilers/layouts.
 inline bool decode(const uint8_t* code,size_t size,uintptr_t base,uintptr_t submit,Layout& result) {
     if(size<128 || size>2048)return false;
     if(std::memcmp(code,"\x84\xc0\x0f\x84",4))return false;
