@@ -42,7 +42,7 @@
 
 0.25.1: Share local character information with compatible mods.
 
-0.25.0: Prepare joining players’ vehicle data in parallel.
+0.25.0: Prepare joining playersâ€™ vehicle data in parallel.
 
 0.24.0: Preserve local character collisions on moving vehicles.
 
@@ -69,6 +69,8 @@
 0.22.13: Predict eligible body motion in parallel.
 
 0.22.12: Disable sphere caching by default.
+
+0.22.11: Correct sphere cache checks.
 
 0.22.10: Improve sphere caching when bodies move.
 
