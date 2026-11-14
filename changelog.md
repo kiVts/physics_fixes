@@ -42,7 +42,7 @@
 
 0.25.1: Share local character information with compatible mods.
 
-0.25.0: Prepare joining playersâ€™ vehicle data in parallel.
+0.25.0: Prepare joining player vehicle data in parallel.
 
 0.24.0: Preserve local character collisions on moving vehicles.
 
