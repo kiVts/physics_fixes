@@ -1,3 +1,5 @@
+0.26.14: Multithread Lua, on by default; fewer, clearer settings; your changes still apply.
+
 0.26.13: Supports Stormworks v1.15.27; adds optional parallel radio processing.
 
 0.26.12: Fix seabed memory leaks and audio profiler freezes.

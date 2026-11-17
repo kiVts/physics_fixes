@@ -1,5 +1,6 @@
 
 #include "mt_dispatch.h"
+#include "mt_settings.h"
 #include "phys_pool.h"
 
 #include "hooks.h"
@@ -262,6 +263,7 @@ bool install()
     int threads = static_cast<int>(GetPrivateProfileIntW(L"parallel", L"threads", 0, ini.c_str()));
     g_min_pairs = static_cast<int>(GetPrivateProfileIntW(L"parallel", L"min_pairs", 256, ini.c_str()));
     int hw = static_cast<int>(std::thread::hardware_concurrency());
+    if (!mt_area(L"physics")) threads = 1; // [multithreading] physics=0: the game's one thread
     if (threads <= 0) threads = hw - 2 < 6 ? hw - 2 : 6;
     g_threads = std::min(threads, phys_pool_threads()) - 1; // worker threads besides the physics thread
     if (g_threads <= 0) {

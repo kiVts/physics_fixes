@@ -1,6 +1,7 @@
 
 #include "hull_rays.h"
 #include "join_wait.h"
+#include "mt_settings.h"
 
 #include "game.h"
 #include "hooks.h"
@@ -37,6 +38,10 @@ std::condition_variable g_cv;
 uint64_t g_gen = 0;
 DWORD g_update_tid = 0;
 std::atomic<uint64_t> g_casts{0}, g_deferred{0}, g_cycles{0}, g_join_wait{0};
+// joins that found casts outstanding, by site x (0 pool thread, 1 update thread): count, cycles in the join, cycles of
+// that spent casting (the joiner helps) rather than waiting
+constexpr int kSites = static_cast<int>(HullJoin::count);
+std::atomic<uint64_t> g_site_n[kSites][2], g_site_cyc[kSites][2], g_site_help[kSites][2];
 
 void run_some()
 {
@@ -78,7 +83,7 @@ void __fastcall rays_detour(uint8_t* sampler, void* ocean, const double* box)
     }
     // g_jobs only grows between joins; the pool reads entries below g_queued, published after the write
     int n = g_queued.load(std::memory_order_relaxed);
-    if (n == static_cast<int>(g_jobs.capacity())) hull_rays_join(); // never reallocate under running workers
+    if (n == static_cast<int>(g_jobs.capacity())) hull_rays_join(HullJoin::full); // never reallocate under running workers
     n = g_queued.load(std::memory_order_relaxed);
     {
         std::lock_guard lock(g_jobs_mu);
@@ -100,6 +105,7 @@ void __fastcall rays_detour(uint8_t* sampler, void* ocean, const double* box)
 DWORD WINAPI log_loop(void*)
 {
     uint64_t lc = 0, ld = 0, lcy = 0, lw = 0;
+    uint64_t ln[kSites][2] = {}, lsc[kSites][2] = {}, lsh[kSites][2] = {};
     LARGE_INTEGER f, a, b;
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&a);
@@ -107,6 +113,7 @@ DWORD WINAPI log_loop(void*)
     Sleep(50);
     QueryPerformanceCounter(&b);
     double cyc_per_ms = double(__rdtsc() - r0) / (double(b.QuadPart - a.QuadPart) * 1000.0 / double(f.QuadPart));
+    static const char* const kSiteName[kSites] = {"vehicle loop", "hull tasks", "tick start", "queue full"};
     for (;;) {
         Sleep(5000);
         uint64_t c = g_casts, d = g_deferred, cy = g_cycles, w = g_join_wait;
@@ -115,14 +122,38 @@ DWORD WINAPI log_loop(void*)
               static_cast<unsigned long long>(c - lc), c > lc ? 100.0 * double(d - ld) / double(c - lc) : 0.0,
               double(cy - lcy) / cyc_per_ms / 5.0, double(w - lw) / cyc_per_ms / 5.0);
         lc = c, ld = d, lcy = cy, lw = w;
+        // by site: ms/s in the join (of it casting), and how many joins found casts outstanding
+        char text[768] = {};
+        size_t at = 0;
+        auto put = [&](const char* fmt, auto... args) {
+            if (at + 1 >= sizeof text) return;
+            const int r = snprintf(text + at, sizeof text - at, fmt, args...);
+            if (r > 0) at = std::min(sizeof text - 1, at + size_t(r));
+        };
+        for (int t = 1; t >= 0; --t) {
+            put("%s%s:", t ? "" : "; ", t ? "update thread" : "pool threads");
+            bool any = false;
+            for (int s = 0; s < kSites; ++s) {
+                const uint64_t n = g_site_n[s][t].load(std::memory_order_relaxed), sc = g_site_cyc[s][t].load(std::memory_order_relaxed),
+                               sh = g_site_help[s][t].load(std::memory_order_relaxed);
+                if (n != ln[s][t]) {
+                    put(" %s %.3f ms/s (casting %.3f) in %llu", kSiteName[s], double(sc - lsc[s][t]) / cyc_per_ms / 5.0,
+                        double(sh - lsh[s][t]) / cyc_per_ms / 5.0, static_cast<unsigned long long>(n - ln[s][t]));
+                    any = true;
+                }
+                ln[s][t] = n, lsc[s][t] = sc, lsh[s][t] = sh;
+            }
+            if (!any) put(" none");
+        }
+        swlog("hull rays joins 5s: %s", text);
     }
 }
 
 bool install()
 {
     std::wstring ini = settings_ini();
-    if (!GetPrivateProfileIntW(L"hull_rays", L"defer", 1, ini.c_str())) {
-        swlog("hull rays: off in settings.ini");
+    if (!hull_rays_enabled()) {
+        swlog("hull rays: off ([hull_rays] defer=0 or multithreaded physics off)");
         return true;
     }
     int threads = static_cast<int>(GetPrivateProfileIntW(L"hull_rays", L"threads", 0, ini.c_str()));
@@ -131,10 +162,10 @@ bool install()
     if (!swml()->on_loop(swml_self(), [](void*) {
             DWORD tid = GetCurrentThreadId();
             if (g_update_tid != tid) {
-                hull_rays_join(); // anything queued under the old id
+                hull_rays_join(HullJoin::tick); // anything queued under the old id
                 g_update_tid = tid;
             }
-            hull_rays_join(); // backstop: nothing deferred crosses a tick
+            hull_rays_join(HullJoin::tick); // backstop: nothing deferred crosses a tick
         }, nullptr, nullptr, nullptr)) {
         swlog("hull rays: no game loop events; off");
         return true;
@@ -153,7 +184,12 @@ HookRegistrar reg{{"hull rays", /*needs_known_build=*/true, &install}};
 
 } // namespace
 
-void hull_rays_join()
+bool hull_rays_enabled()
+{
+    return mt_area(L"physics") && GetPrivateProfileIntW(L"hull_rays", L"defer", 1, settings_ini()) != 0;
+}
+
+void hull_rays_join(HullJoin site)
 {
     if (g_done.load(std::memory_order_acquire) == g_queued.load(std::memory_order_acquire)) {
         // all done: the update thread starts the next batch from empty
@@ -168,9 +204,16 @@ void hull_rays_join()
     }
     uint64_t t0 = __rdtsc();
     run_some(); // help
+    const uint64_t t1 = __rdtsc();
     wait_for_workers("hull rays", [] { return g_done.load(std::memory_order_acquire) >= g_queued.load(std::memory_order_acquire); });
-    g_join_wait.fetch_add(__rdtsc() - t0, std::memory_order_relaxed);
-    if (GetCurrentThreadId() == g_update_tid) {
+    const uint64_t t2 = __rdtsc();
+    g_join_wait.fetch_add(t2 - t0, std::memory_order_relaxed);
+    const bool update = GetCurrentThreadId() == g_update_tid;
+    const int s = std::clamp(static_cast<int>(site), 0, kSites - 1);
+    g_site_n[s][update].fetch_add(1, std::memory_order_relaxed);
+    g_site_cyc[s][update].fetch_add(t2 - t0, std::memory_order_relaxed);
+    g_site_help[s][update].fetch_add(t1 - t0, std::memory_order_relaxed);
+    if (update) {
         std::lock_guard lock(g_jobs_mu);
         g_queued.store(0, std::memory_order_release);
         g_next.store(0, std::memory_order_release);

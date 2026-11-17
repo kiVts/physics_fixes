@@ -4,6 +4,7 @@
 #include "game.h"
 #include "hooks.h"
 #include "log.h"
+#include "hull_rays.h"
 #include "sdk.h"
 #include "world.h"
 
@@ -393,7 +394,7 @@ bool install()
     int ok = 0;
     std::string failed;
     // hull_rays.cpp hooks the water rays (one hook per address): it logs their time itself
-    const bool rays_deferred = GetPrivateProfileIntW(L"hull_rays", L"defer", 1, settings_ini()) != 0;
+    const bool rays_deferred = hull_rays_enabled();
     for (int i = 0; i < kN; i++) {
         if (rays_deferred && kProbes[i].address == 0x1402f4950) {
             failed += std::string(failed.empty() ? "" : ", ") + kProbes[i].name + " (hull_rays has it)";

@@ -149,7 +149,7 @@ DWORD WINAPI log_loop(void*)
 bool install()
 {
     if (!kEarlyLaunchAudited) return true; // no dormant locks in stable mode
-    const bool requested = GetPrivateProfileIntW(L"parallel", L"early_launch", 1, settings_ini()) == 1;
+    const bool requested = GetPrivateProfileIntW(L"parallel", L"early_launch", 0, settings_ini()) == 1;
     if (!requested) return true;
     g_on = false; // publish only after every hook and all hooks succeed
     const bool ok =

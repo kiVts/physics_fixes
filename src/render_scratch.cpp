@@ -264,3 +264,12 @@ bool install()
 HookRegistrar reg{{"render_scratch", /*needs_known_build=*/true, &install}};
 
 } // namespace
+
+// vehicle_mt.cpp (unlocked Lua): this mod's _aligned_free detour and what it calls on; false = not hooked here
+bool scratch_free_hook(uintptr_t* detour, uintptr_t* next)
+{
+    if (!g_free) return false;
+    *detour = reinterpret_cast<uintptr_t>(&aligned_free_detour);
+    *next = reinterpret_cast<uintptr_t>(g_free);
+    return true;
+}

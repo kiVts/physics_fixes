@@ -3,6 +3,7 @@
 #include "game.h"
 #include "hooks.h"
 #include "log.h"
+#include "mt_settings.h"
 #include "sdk.h"
 #include "solver_units.h"
 #include "world.h"
@@ -1238,6 +1239,7 @@ bool install()
     wchar_t mode[32] = L"";
     GetPrivateProfileStringW(L"solver", L"parallel", L"parallel", mode, 32, ini);
     g_mode = !_wcsicmp(mode, L"off") ? Mode::kGame : !_wcsicmp(mode, L"serial") ? Mode::kSerial : Mode::kParallel;
+    if (!mt_area(L"physics")) g_mode = Mode::kGame; // [multithreading] physics=0: the game's own solver loop
     int threads = static_cast<int>(GetPrivateProfileIntW(L"solver", L"threads", 0, ini));
     int hw = static_cast<int>(std::thread::hardware_concurrency());
     if (threads <= 0) threads = std::min(hw - 2, 6);

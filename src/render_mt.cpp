@@ -5,6 +5,7 @@
 #include "join_wait.h"
 #include "hooks.h"
 #include "log.h"
+#include "mt_settings.h"
 #include "sdk.h"
 
 #include <windows.h>
@@ -334,6 +335,15 @@ bool rp_arena_free(void* p)
     return false;
 }
 void rp_free_hook_live() { g_free_hook_live.store(true); }
+// vehicle_mt.cpp (unlocked Lua): this mod's _aligned_free detour and what it calls on, when it is this file's
+// (scratch_buffers=0); false = not hooked here
+bool rp_free_hook(uintptr_t* detour, uintptr_t* next)
+{
+    if (!g_afree_orig) return false;
+    *detour = reinterpret_cast<uintptr_t>(&afree_detour);
+    *next = reinterpret_cast<uintptr_t>(g_afree_orig);
+    return true;
+}
 
 namespace {
 // _aligned_free hooked (by render_scratch.cpp or here)? Hooks go live after every mod installed: look for the jump.
@@ -835,7 +845,7 @@ uint8_t* make_exit_stub(Asm& a)
     a.b({0x48, 0x89, 0xC1});                          // mov rcx, rax
     a.mov_rax(reinterpret_cast<uint64_t>(g_switch_out)); // 10 bytes
     a.b({0xFF, 0xE0});                                // jmp rax
-    // normal: live here are only callee-saved registers and rsp (tools/live_in.py), so the call above is harmless
+    // normal: live here are only callee-saved registers and rsp, so the call above is harmless
     a.b({0x49, 0x8D, 0x8F, 0x78, 0x07, 0x00, 0x00});
     a.jmp_abs(live(kLoopExitNext));
     return start;
@@ -980,9 +990,10 @@ bool install()
     wchar_t mode[32];
     GetPrivateProfileStringW(L"render", L"parallel_prep", L"parallel", mode, 32, ini.c_str());
     g_mode = !_wcsicmp(mode, L"single") ? kSingle : !_wcsicmp(mode, L"parallel") ? kParallel : kOff;
+    if (!mt_area(L"rendering")) g_mode = kOff; // [multithreading] rendering=0
     if (g_mode == kOff) {
         setup_heaps(ini, false);
-        swlog("render prep loop: off in settings.ini ([render] parallel_prep=parallel to draw vehicles on several threads)");
+        swlog("render prep loop: off (multithreaded rendering off, or [render] parallel_prep=off)");
         return true;
     }
     int threads = static_cast<int>(GetPrivateProfileIntW(L"render", L"prep_threads", 0, ini.c_str()));

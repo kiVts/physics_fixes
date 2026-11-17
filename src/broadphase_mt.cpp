@@ -2,6 +2,7 @@
 #include "game.h"
 #include "hooks.h"
 #include "log.h"
+#include "mt_settings.h"
 #include "phys_pool.h"
 #include "sdk.h"
 #include "world.h"
@@ -410,9 +411,10 @@ void __fastcall update_aabbs_detour(void* world_v)
 bool install()
 {
     const wchar_t* ini = settings_ini();
-    g_on = GetPrivateProfileIntW(L"broadphase", L"parallel_pairs", 1, ini) != 0;
+    const bool physics_mt = mt_area(L"physics"); // [multithreading] physics=0: both off
+    g_on = physics_mt && GetPrivateProfileIntW(L"broadphase", L"parallel_pairs", 1, ini) != 0;
     g_verify_every = static_cast<int>(GetPrivateProfileIntW(L"broadphase", L"verify_every", 64, ini));
-    g_aabbs_on = GetPrivateProfileIntW(L"broadphase", L"parallel_aabbs", 1, ini) != 0;
+    g_aabbs_on = physics_mt && GetPrivateProfileIntW(L"broadphase", L"parallel_aabbs", 1, ini) != 0;
     {
         wchar_t buf[32];
         GetPrivateProfileStringW(L"broadphase", L"prediction", L"0.25", buf, 32, ini);

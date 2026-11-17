@@ -1,7 +1,7 @@
 #pragma once
 // The call stub of ai_rays.cpp: called in place of a 5-argument function, it calls `target` with the same five
 // arguments plus the caller's rbx as a sixth, and returns its rax. Its own 0x38-byte frame keeps the call 16-aligned;
-// unwind data is registered so stack walks get through it. mem: 128 bytes, executable. Tested in ai_rays_stub_test.
+// unwind data is registered so stack walks get through it. mem: 128 bytes, executable.
 #include <windows.h>
 #include <cstdint>
 #include <cstring>

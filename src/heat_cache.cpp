@@ -2,6 +2,7 @@
 #include "game.h"
 #include "hooks.h"
 #include "log.h"
+#include "mt_settings.h"
 #include "phys_pool.h"
 #include "sdk.h"
 #include "world.h"
@@ -185,7 +186,7 @@ bool install()
         return !puppet_ghosts || hook_game(kGhostContacts, reinterpret_cast<void*>(&ghost_detour), reinterpret_cast<void**>(&o_ghost));
     }
     g_verify_every = static_cast<int>(GetPrivateProfileIntW(L"heat", L"verify_every", 64, ini));
-    g_par_ghosts = GetPrivateProfileIntW(L"heat", L"parallel_ghosts", 1, ini) != 0;
+    g_par_ghosts = mt_area(L"physics") && GetPrivateProfileIntW(L"heat", L"parallel_ghosts", 1, ini) != 0;
     g_ret = reinterpret_cast<uintptr_t>(game_ptr(kHeatFieldRet));
     if (!hook_game(kBox, reinterpret_cast<void*>(&box_detour), reinterpret_cast<void**>(&o_box)) ||
         !hook_game(kZone12, reinterpret_cast<void*>(&zone12_detour), reinterpret_cast<void**>(&o_zone12)) ||

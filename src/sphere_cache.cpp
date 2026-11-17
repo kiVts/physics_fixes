@@ -160,7 +160,7 @@ bool install()
 {
     std::wstring ini = settings_ini();
     if (!GetPrivateProfileIntW(L"contain", L"sphere_cache", 0, ini.c_str())) {
-        swlog("sphere cache: off ([contain] sphere_cache=1 to try it; measured no gain, see RENDER_PREP_NEXT.md)");
+        swlog("sphere cache: off ([contain] sphere_cache=1 to try it)");
         return true;
     }
     g_margin = std::max(1, static_cast<int>(GetPrivateProfileIntW(L"contain", L"sphere_margin_m", 1, ini.c_str())));

@@ -2,6 +2,7 @@
 #include "game.h"
 #include "hooks.h"
 #include "log.h"
+#include "mt_settings.h"
 #include "sdk.h"
 
 #include <windows.h>
@@ -158,8 +159,8 @@ void __fastcall particles_detour(uint8_t* ring_p)
 bool install()
 {
     const wchar_t* ini = settings_ini();
-    if (!GetPrivateProfileIntW(L"particles", L"parallel", 1, ini)) {
-        swlog("particles: parallel=0, the game's loop");
+    if (!mt_area(L"rendering") || !GetPrivateProfileIntW(L"particles", L"parallel", 1, ini)) {
+        swlog("particles: off (multithreaded rendering off, or [particles] parallel=0), the game's loop");
         return true;
     }
     int threads = static_cast<int>(GetPrivateProfileIntW(L"particles", L"threads", 0, ini));

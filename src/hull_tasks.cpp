@@ -3,6 +3,7 @@
 #include "game.h"
 #include "hooks.h"
 #include "log.h"
+#include "mt_settings.h"
 #include "sdk.h"
 
 #include <windows.h>
@@ -65,7 +66,7 @@ uintptr_t live(uintptr_t a) { return game_live(a); }
 void run_task(uint8_t* task)
 {
     auto vt = *reinterpret_cast<void (***)(uint8_t*)>(task);
-    hull_rays_join(); // the body's water rays may still be on hull_rays' pool (cheap when none are)
+    hull_rays_join(HullJoin::task); // the body's water rays may still be on hull_rays' pool (cheap when none are)
     vt[1](task);
     task[0xb0] = 0;
     g_lock(task + 0x10);
@@ -396,8 +397,8 @@ bool install()
         swlog("hull tasks: bodies keep their hull force ring's buffer between ticks (keep_ring=1)");
     wchar_t mode[32] = {};
     GetPrivateProfileStringW(L"hull_tasks", L"mode", L"parallel", mode, 32, ini);
-    if (_wcsicmp(mode, L"off") == 0) {
-        swlog("hull tasks: mode=off, the game's one worker thread");
+    if (_wcsicmp(mode, L"off") == 0 || !mt_area(L"physics")) {
+        swlog("hull tasks: off (mode=off or multithreaded physics off), the game's one worker thread");
         return true;
     }
     g_parallel = _wcsicmp(mode, L"serial") != 0;

@@ -309,7 +309,7 @@ bool install()
         swlog("early launch: disabled by stability audit; native physics/logic order retained (including existing early_launch=1 settings)");
         return true;
     }
-    g_mode = static_cast<int>(GetPrivateProfileIntW(L"parallel", L"early_launch", 1, settings_ini()));
+    g_mode = static_cast<int>(GetPrivateProfileIntW(L"parallel", L"early_launch", 0, settings_ini()));
     if (g_mode <= 0) return true; // lockstep: nothing hooked
     g_pre_step = game_ptr<PreStep_t>(kPreStep);
     g_clear = game_ptr<Clear_t>(kQueueClear);

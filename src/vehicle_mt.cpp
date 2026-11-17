@@ -4,6 +4,7 @@
 #include "join_wait.h"
 #include "hooks.h"
 #include "log.h"
+#include "mt_settings.h"
 #include "sdk.h"
 #include "vehicle_aero.h"
 #include "sensor_sources.h"
@@ -14,6 +15,8 @@
 #include "radio_phase_contract.h"
 #include "lua_tick_contract.h"
 #include "lua_gate.h"
+#include "lua_clock_hook.h"
+#include "lua_tokens.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -31,6 +34,10 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+// this mod's own _aligned_free detour and what it calls on (render_scratch.cpp / render_mt.cpp); false = not hooked there
+bool scratch_free_hook(uintptr_t* detour, uintptr_t* next);
+bool rp_free_hook(uintptr_t* detour, uintptr_t* next);
 
 namespace {
 
@@ -249,6 +256,8 @@ struct WrapFrame {
     bool sticky;
     uint64_t t0;
     bool nolock = false; // a microcontroller onTick running without the lock (lua_gate.h)
+    uintptr_t token = 0;  // a Lua VM token this frame holds (dropped when it leaves)
+    bool token_only = false; // holds only a VM token, no lock (a Lua entry on a thread that isn't under the lock)
 };
 constexpr int kMaxDepth = 64;
 thread_local WrapFrame tl_frames[kMaxDepth];
@@ -502,61 +511,55 @@ thread_local bool tl_lua = false;
 thread_local uintptr_t tl_lua_L = 0, tl_lua_G = 0;
 thread_local int tl_nolock_frames = 0; // nolock frames on tl_frames (0 or 1)
 std::atomic<uint64_t> g_lua_free{0}, g_lua_free_cycles{0}, g_lua_went_locked{0}, g_lua_foreign{0}, g_lua_pre_locked{0},
-    g_lua_conflicts{0}, g_lua_tail_locked{0}, g_lua_other_conflicts{0};
+    g_lua_conflicts{0}, g_lua_tail_locked{0}, g_lua_other_conflicts{0}, g_lua_life_calls{0}, g_lua_life_during{0};
+std::atomic<bool> g_lua_kill{false}; // a conflict that couldn't be serialized: unlocked Lua goes off before the next tick
 constexpr int kLuaLockFns = 32; // which C functions made scripts take the lock: the first 32 distinct ones
 std::atomic<uintptr_t> g_lua_lock_fn[kLuaLockFns];
 std::atomic<uint64_t> g_lua_lock_fn_n[kLuaLockFns], g_lua_lock_fn_other{0};
 std::atomic<int> g_lua_logged{0};
 uint16_t g_lua_obs_off[kNumSinks] = {};
+uintptr_t g_sink_live[kNumSinks] = {};  // where each wrapped sink was hooked, and its entry stub
+uint8_t* g_sink_stub[kNumSinks] = {};
+void* g_tramp_seen[kNumSinks] = {};     // the "original" last found outside every module (a MinHook trampoline)
+HMODULE g_core_module = nullptr;        // the SWML core (its clock hook is the one foreign detour an audited unit may have)
+uintptr_t g_clock_seen = 0;
 
-// VM ownership: global_State pointers in use by unlocked onTicks, in 64 small striped sets
-struct TokenStripe {
-    SRWLOCK lock = SRWLOCK_INIT;
-    uintptr_t g[8] = {};
-};
-TokenStripe g_tokens[64];
-TokenStripe& token_stripe(uintptr_t G) { return g_tokens[((G >> 4) ^ (G >> 12)) & 63]; }
-
-// false: the VM is in use on another thread (clash = true) or the stripe is full; the caller runs locked
-bool token_take(uintptr_t G, bool& clash)
+// VM ownership: lua_tokens.h (one owner thread per VM; the waiting rule there).
+void lua_conflict(int sink, uintptr_t G)
 {
-    TokenStripe& s = token_stripe(G);
-    AcquireSRWLockExclusive(&s.lock);
-    int free_i = -1;
-    clash = false;
-    for (int i = 0; i < 8; i++) {
-        if (s.g[i] == G) clash = true;
-        else if (!s.g[i] && free_i < 0) free_i = i;
-    }
-    const bool ok = !clash && free_i >= 0;
-    if (ok) s.g[free_i] = G;
-    ReleaseSRWLockExclusive(&s.lock);
-    return ok;
+    g_lua_other_conflicts.fetch_add(1, std::memory_order_relaxed);
+    const bool first = !g_lua_kill.exchange(true);
+    if (g_lua_logged.fetch_add(1) < 20)
+        swlog("vehicle logic: %s entered Lua VM %llx while another thread used it, and this thread can't wait (it holds the lock or"
+              " another VM); unlocked Lua switches off before the next tick", kSinks[sink].name, static_cast<unsigned long long>(G));
+    if (first) swml_report_fault(swml(), swml_self());
 }
 
-void token_drop(uintptr_t G)
+// the token for a Lua entry on VM G: G if this call took it (its frame drops it), 0 if this thread already owns it, G is
+// unknown, or it couldn't be taken (then a conflict is reported)
+uintptr_t lua_token_for_call(uintptr_t G, int sink)
 {
-    TokenStripe& s = token_stripe(G);
-    AcquireSRWLockExclusive(&s.lock);
-    for (uintptr_t& g : s.g)
-        if (g == G) {
-            g = 0;
-            break;
-        }
-    ReleaseSRWLockExclusive(&s.lock);
+    if (!G) return 0;
+    bool waited = false;
+    const lua_tokens::State t = lua_tokens::take_or_wait(G, tl_mode == kUnlocked && !lua_tokens::tl_held, &waited);
+    if (waited) g_lua_conflicts.fetch_add(1, std::memory_order_relaxed); // waits: two threads wanted one VM
+    if (t == lua_tokens::kBusy || t == lua_tokens::kFull) lua_conflict(sink, G);
+    return t == lua_tokens::kTaken ? G : 0;
 }
 
-bool token_held(uintptr_t G)
+// a token-only frame (no lock): the call returns through the post stub, which drops the token
+bool push_token_frame(uintptr_t* ret_slot, int sink, uintptr_t token)
 {
-    TokenStripe& s = token_stripe(G);
-    AcquireSRWLockShared(&s.lock);
-    bool held = std::find(std::begin(s.g), std::end(s.g), G) != std::end(s.g);
-    ReleaseSRWLockShared(&s.lock);
-    return held;
+    if (tl_depth >= kMaxDepth) return false;
+    WrapFrame fr{*ret_slot, sink, false, __rdtsc()};
+    fr.token = token;
+    fr.token_only = true;
+    tl_frames[tl_depth++] = fr;
+    tl_nolock_frames++; // holds no lock: "no locked frame below" stays true for what it calls
+    *ret_slot = reinterpret_cast<uintptr_t>(g_post_stub);
+    return true;
 }
 
-// another Lua entry (create / compile / close / save / editor) on a VM an unlocked onTick is running: log it.
-// Those entries keep their own lock; this only reports what the unit model says can't happen.
 uintptr_t lua_state_of(uintptr_t obj, uint16_t off)
 {
     __try {
@@ -567,44 +570,152 @@ uintptr_t lua_state_of(uintptr_t obj, uint16_t off)
     }
 }
 
-void lua_note_other(int sink, uintptr_t obj)
+// --- after every hook is on: the executed code is still the audited code ----------------------------------------
+HMODULE module_of(uintptr_t a)
 {
-    const uintptr_t G = lua_state_of(obj, g_lua_obs_off[sink]);
-    if (!G || !token_held(G)) return;
-    g_lua_other_conflicts.fetch_add(1, std::memory_order_relaxed);
-    if (g_lua_logged.fetch_add(1) < 20)
-        swlog("vehicle logic: %s ran on a Lua VM (%llx) while an unlocked onTick used it on another thread", kSinks[sink].name,
-              static_cast<unsigned long long>(G));
+    HMODULE h = nullptr;
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCWSTR>(a), &h) ? h : nullptr;
 }
 
-bool lua_enter_unlocked(uintptr_t* ret_slot, int sink)
+// sink i's hook is live and this mod's wrapper is the newest detour on it; `alone`: and what it calls on is MinHook's
+// trampoline (the game code), not another mod's detour - that one would run inside an unlocked onTick
+bool own_hook(int i, bool alone)
 {
-    if (tl_mode != kUnlocked || tl_lua || tl_depth >= kMaxDepth) return false; // already under the lock: as before
-    const uintptr_t comp = ret_slot[-1];
-    const uintptr_t L = rd<uintptr_t>(comp + 0x668);
-    const uintptr_t G = L ? rd<uintptr_t>(L + 0x18) : 0;
-    const uintptr_t hook = L ? rd<uintptr_t>(L + 0xa8) : 0;
-    if (!G || rd<uintptr_t>(G) != g_lua_alloc || rd<uintptr_t>(G + 0xc8) != L || (hook && hook != g_lua_hook)) {
+    if (i < 0 || !g_sink_live[i] || lua_gate::hook_target(g_sink_live[i]) != reinterpret_cast<uintptr_t>(g_sink_stub[i])) return false;
+    if (!alone || g_tramps[i] == g_tramp_seen[i]) return true;
+    if (module_of(reinterpret_cast<uintptr_t>(g_tramps[i]))) return false;
+    g_tramp_seen[i] = g_tramps[i];
+    return true;
+}
+
+// in a loaded image (MinHook's trampolines are private memory); VirtualQuery doesn't take the loader lock
+bool in_image(uintptr_t a)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    return VirtualQuery(reinterpret_cast<const void*>(a), &mbi, sizeof mbi) && mbi.Type == MEM_IMAGE;
+}
+
+const char* g_hook_why = nullptr; // why lua_hook_ok refused a clock detour (logged by lua_post_check)
+
+bool lua_hook_ok(uintptr_t unit, uintptr_t detour, lua_gate::Clock which)
+{
+    // each clock unit has exactly one accepted foreign detour: the core's on the game clock, the SDK flight-pass
+    // timer detour on the game timer. Neither is accepted on the other unit.
+    if (which == lua_gate::Clock::clock) {
+        if (detour == g_clock_seen) return true;
+        if (g_core_module && module_of(detour) == g_core_module) {
+            g_clock_seen = detour;
+            return true;
+        }
+        g_hook_why = "the game clock is hooked by code outside the SWML core";
+        return false;
+    }
+    if (which == lua_gate::Clock::timer) {
+        // checked every tick: its next hop and key are other mods' variables
+        const char* why = lua_clock_hook::check(detour, unit, &in_image, &lua_gate::audited);
+        if (!why) return true;
+        g_hook_why = why;
+        return false;
+    }
+    for (int i = 0; i < kNumSinks; i++)
+        if (g_sink_live[i] == unit) return detour == reinterpret_cast<uintptr_t>(g_sink_stub[i]) && own_hook(i, true);
+    // this mod's own _aligned_free detour (render_scratch.cpp, or render_mt.cpp with scratch_buffers=0), alone on it
+    uintptr_t own = 0, next = 0;
+    if ((scratch_free_hook(&own, &next) && detour == own) || (rp_free_hook(&own, &next) && detour == own)) {
+        const char* why = lua_clock_hook::own_alone(detour, unit, own, next, &in_image);
+        if (!why) return true;
+        g_hook_why = why;
+    }
+    return false;
+}
+
+// lua_post_check, once unlocked Lua goes off: every refused unit, with game-relative addresses and the detour's module
+void note_refused(uintptr_t at, uintptr_t detour, const char* why)
+{
+    char where[MAX_PATH] = "private memory";
+    uintptr_t off = detour;
+    if (HMODULE m = detour ? module_of(detour) : nullptr) {
+        char path[MAX_PATH] = {};
+        if (GetModuleFileNameA(m, path, MAX_PATH)) {
+            const char* name = strrchr(path, '\\');
+            snprintf(where, sizeof where, "%s", name ? name + 1 : path);
+        }
+        off = detour - reinterpret_cast<uintptr_t>(m);
+    }
+    swlog("vehicle logic: Lua unlocked: refused at game+%llx: %s%s%s; detour %s+%llx", static_cast<unsigned long long>(at - game_base()),
+          why, g_hook_why ? "; " : "", g_hook_why ? g_hook_why : "", detour ? where : "none", static_cast<unsigned long long>(off));
+    g_hook_why = nullptr;
+}
+
+// update thread, before the loop's units run (no Lua entry in flight). false = unlocked Lua must go off (logged)
+bool lua_post_check()
+{
+    const char* why = nullptr;
+    uintptr_t at = 0;
+    g_hook_why = nullptr;
+    if (!own_hook(g_lua_sink, true) || !own_hook(g_http_tail_sink, true)) {
+        why = "the onTick caller / HTTP tail wrapper isn't live, or another detour shares its function";
+        at = g_sink_live[own_hook(g_lua_sink, true) ? g_http_tail_sink : g_lua_sink];
+    }
+    for (int i = 0; !why && i < kNumSinks; i++)
+        if (g_lua_obs_off[i] && !own_hook(i, false)) {
+            why = "a Lua entry wrapper isn't live, or another mod's detour runs before it";
+            at = g_sink_live[i];
+        }
+    if (!why) {
+        uintptr_t window = 0;
+        const uint8_t* bytes = nullptr;
+        size_t size = 0;
+        if (!lua_tick::installed_window(&window, &bytes, &size)) window = 0;
+        why = lua_gate::recheck(&lua_hook_ok, window, bytes, size, &at);
+        if (why) {
+            // the same pass again, logging every refused unit (one session shows all of them, not only the first)
+            g_hook_why = nullptr;
+            uintptr_t first = 0;
+            lua_gate::recheck(&lua_hook_ok, window, bytes, size, &first, &note_refused);
+            g_hook_why = nullptr;
+        }
+    }
+    if (!why) return true;
+    swlog("vehicle logic: Lua unlocked: off (%s%s%s, at game+%llx); microcontroller Lua stays under the lock", why,
+          g_hook_why ? "; " : "", g_hook_why ? g_hook_why : "", static_cast<unsigned long long>(at ? at - game_base() : 0));
+    return false;
+}
+
+bool lua_enter_unlocked(uintptr_t* ret_slot, int sink, uintptr_t G, uintptr_t* token)
+{
+    *token = 0;
+    if (tl_depth >= kMaxDepth) {
+        // no frame left (the caller goes sticky): nothing could drop a token; only check nobody else is in this VM
+        if (G) {
+            const lua_tokens::State t = lua_tokens::take(G);
+            if (t == lua_tokens::kTaken) lua_tokens::drop(G); // free: give it straight back
+            else if (t != lua_tokens::kOwn) lua_conflict(sink, G);
+        }
+        return false;
+    }
+    *token = lua_token_for_call(G, sink);
+    if (!G) {
         g_lua_pre_locked.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    bool clash = false;
-    if (!token_take(G, clash)) {
-        if (clash) {
-            g_lua_conflicts.fetch_add(1, std::memory_order_relaxed);
-            if (g_lua_logged.fetch_add(1) < 20)
-                swlog("vehicle logic: Lua VM %llx entered by two threads at once (component %llx); this onTick runs under the lock",
-                      static_cast<unsigned long long>(G), static_cast<unsigned long long>(comp));
-        } else {
-            g_lua_pre_locked.fetch_add(1, std::memory_order_relaxed);
-        }
-        return false;
+    if (tl_mode != kUnlocked || tl_lua || !*token) return false; // under the lock already, or an outer frame owns the VM
+    const uintptr_t comp = ret_slot[-1];
+    const uintptr_t L = rd<uintptr_t>(comp + 0x668);
+    const uintptr_t hook = L ? rd<uintptr_t>(L + 0xa8) : 0;
+    if (rd<uintptr_t>(G) != g_lua_alloc || rd<uintptr_t>(G + 0xc8) != L || (hook && hook != g_lua_hook)) {
+        g_lua_pre_locked.fetch_add(1, std::memory_order_relaxed);
+        return false; // locked, still holding the token
     }
     tl_lua = true;
     tl_lua_L = L;
     tl_lua_G = G;
     g_lua_active.fetch_add(1, std::memory_order_relaxed); // read by this thread's own checks (program order)
-    tl_frames[tl_depth++] = WrapFrame{*ret_slot, sink, false, __rdtsc(), true};
+    WrapFrame fr{*ret_slot, sink, false, __rdtsc(), true};
+    fr.token = *token;
+    *token = 0; // the nolock frame owns it now
+    tl_frames[tl_depth++] = fr;
     tl_nolock_frames++;
     *ret_slot = reinterpret_cast<uintptr_t>(g_post_stub);
     return true;
@@ -614,7 +725,6 @@ void lua_leave_unlocked(const WrapFrame& fr)
 {
     tl_nolock_frames--;
     tl_lua = false;
-    token_drop(tl_lua_G);
     tl_lua_L = tl_lua_G = 0;
     g_lua_active.fetch_sub(1, std::memory_order_relaxed);
     g_lua_free.fetch_add(1, std::memory_order_relaxed);
@@ -651,21 +761,39 @@ extern "C" void __fastcall vl_lua_cfunc(uintptr_t L, uintptr_t f)
 
 extern "C" void __fastcall vl_sink_enter(uintptr_t* ret_slot, int sink)
 {
+    uintptr_t token = 0;
+    if (g_lua_on && (sink == g_lua_sink || g_lua_obs_off[sink])) {
+        // every Lua entry, on every thread, holds its VM's token for the call (see lua_token_for_call)
+        const uintptr_t G = lua_state_of(ret_slot[-1], sink == g_lua_sink ? uint16_t(0x668) : g_lua_obs_off[sink]);
+        if (sink != g_lua_sink) {
+            g_lua_life_calls.fetch_add(1, std::memory_order_relaxed);
+            if (g_lua_active.load(std::memory_order_relaxed)) g_lua_life_during.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (!tl_par || tl_sticky) {
+            // not a vehicle worker's own locking (another thread, or this worker is sticky): token around the call only
+            token = lua_token_for_call(G, sink);
+            if (token && !push_token_frame(ret_slot, sink, token)) lua_tokens::drop(token);
+            return;
+        }
+        if (sink == g_lua_sink) {
+            if (lua_enter_unlocked(ret_slot, sink, G, &token)) return;
+            // runs locked as before (kAlways); its frame drops the token
+        } else {
+            token = lua_token_for_call(G, sink); // the other Lua sinks run locked as before; their frame drops it
+        }
+    }
     if (!tl_par || tl_sticky) return; // tl_sticky: the exclusive lock is held until the tick returns already
     bool force_exclusive = false;
     if (g_lua_on) {
         if (sink == g_lua_sink) {
-            if (lua_enter_unlocked(ret_slot, sink)) return;
-            // runs locked as before (kAlways)
         } else if (sink == g_http_tail_sink && tl_lua) {
             const uintptr_t script = ret_slot[-1];
             if (!rd<uint32_t>(script + 0x38) && !rd<uint32_t>(script + 0x50)) return;
             g_lua_tail_locked.fetch_add(1, std::memory_order_relaxed);
             force_exclusive = true;
-        } else if (g_lua_obs_off[sink]) {
-            lua_note_other(sink, ret_slot[-1]);
         }
     }
+    if (token) force_exclusive = true; // a Lua entry that holds a token: always a locked frame (it drops the token)
     if (g_sink_is_ray[sink] && g_ray_patched && !g_iso_lock_rays) return; // per-thread ray stack: no lock needed
     const Sink& sk = kSinks[sink];
     if (sink == g_sensor_sink && tl_mode == kUnlocked && sensor_scan_unlocked(ret_slot)) return;
@@ -691,6 +819,7 @@ extern "C" void __fastcall vl_sink_enter(uintptr_t* ret_slot, int sink)
     bool sticky = kind == kQueue || (kind == kResize && tl_depth == tl_nolock_frames); // no locked frame below: unlocked caller
     if (tl_depth >= kMaxDepth) {
         // no frame left: take the exclusive lock and keep it for the rest of the tick
+        if (token) lua_tokens::drop(token); // (lua_enter_unlocked / lua_token_for_call only take one with a frame free)
         g_overflow++;
         lock_acquire(true, sink);
         tl_sticky = true;
@@ -700,13 +829,20 @@ extern "C" void __fastcall vl_sink_enter(uintptr_t* ret_slot, int sink)
         return;
     }
     lock_acquire(exclusive, sink);
-    tl_frames[tl_depth++] = WrapFrame{*ret_slot, sink, sticky, __rdtsc()};
+    WrapFrame fr{*ret_slot, sink, sticky, __rdtsc()};
+    fr.token = token;
+    tl_frames[tl_depth++] = fr;
     *ret_slot = reinterpret_cast<uintptr_t>(g_post_stub);
 }
 
 extern "C" uintptr_t __fastcall vl_sink_leave()
 {
     WrapFrame fr = tl_frames[--tl_depth];
+    if (fr.token) lua_tokens::drop(fr.token); // the VM call is over
+    if (fr.token_only) {
+        tl_nolock_frames--;
+        return fr.ret;
+    }
     if (fr.nolock) {
         lua_leave_unlocked(fr); // no lock to release; a lock a C function took stays tl_sticky until the tick ends
         return fr.ret;
@@ -1201,9 +1337,11 @@ void maybe_log(Mode m)
             if (g_lua_on) {
                 swlog("  Lua unlocked: %.0f/tick onTick calls started without the lock (%.2f thread-ms/tick); %.1f/tick then took it for an"
                       " unaudited C function, %.1f/tick for a call on another VM; %.1f/tick ran locked from the start (VM check), %.1f/tick"
-                      " HTTP tails locked; VM conflicts: %llu onTick + %llu other entries (both must stay 0)",
+                      " HTTP tails locked; other Lua entries %.2f/tick (%.2f/tick while an unlocked onTick ran); VM token waits %llu,"
+                      " conflicts %llu (both must stay 0)",
                       double(g_lua_free.exchange(0)) / t, g_lua_free_cycles.exchange(0) / cyc_ms / t, double(g_lua_went_locked.exchange(0)) / t,
                       double(g_lua_foreign.exchange(0)) / t, double(g_lua_pre_locked.exchange(0)) / t, double(g_lua_tail_locked.exchange(0)) / t,
+                      double(g_lua_life_calls.exchange(0)) / t, double(g_lua_life_during.exchange(0)) / t,
                       static_cast<unsigned long long>(g_lua_conflicts.load()), static_cast<unsigned long long>(g_lua_other_conflicts.load()));
                 std::vector<int> lf;
                 for (int i = 0; i < kLuaLockFns; i++)
@@ -2020,7 +2158,12 @@ uint32_t g_units_list_count = 0, g_units_list_head = 0;
 extern "C" int __fastcall vl_run(uintptr_t rbp, uintptr_t r13, uintptr_t rdi, uintptr_t r14)
 {
     g_units_ready = false;
-    hull_rays_join(); // the hull water rays cast on the pool (hull_rays.cpp) are read in this loop's zone 0x33
+    if (g_lua_on && (g_lua_kill.load() || !lua_post_check())) {
+        // between ticks: no unit runs, so no onTick is inside an unlocked frame; later entries take the locked path
+        g_lua_on = false;
+        if (g_lua_kill.load()) swlog("vehicle logic: Lua unlocked: off (a VM conflict that couldn't be serialized, see above)");
+    }
+    hull_rays_join(HullJoin::loop); // the hull water rays cast on the pool (hull_rays.cpp) are read in this loop's zone 0x33
     if (g_lod_logic == 3) {
         uint64_t now = __rdtsc();
         if (g_ab_prev >= 0 && g_ab_last) g_ab[g_ab_prev].period += now - g_ab_last;
@@ -2381,7 +2524,9 @@ bool install()
 {
     // [vehicle_logic] lua_unlocked: the checked code is hashed before this mod patches or hooks anything (lua_tick below
     // rewrites part of the onTick caller, the sink wrappers hook it and the HTTP tail)
-    const bool lua_wanted = GetPrivateProfileIntW(L"vehicle_logic", L"lua_unlocked", 0, std::wstring(settings_ini()).c_str()) != 0;
+    // [multithreading] lua (the old hidden [vehicle_logic] lua_unlocked only when that key is missing)
+    const bool lua_wanted =
+        mt_area(L"lua", static_cast<int>(GetPrivateProfileIntW(L"vehicle_logic", L"lua_unlocked", 0, std::wstring(settings_ini()).c_str())));
     const bool lua_verified = lua_wanted && lua_gate::verify();
     lua_tick::install();
     std::wstring ini = settings_ini();
@@ -2391,8 +2536,9 @@ bool install()
     wchar_t mode[32];
     GetPrivateProfileStringW(L"vehicle_logic", L"mode", L"parallel", mode, 32, ini.c_str());
     g_mode = !_wcsicmp(mode, L"serial") ? kSerial : !_wcsicmp(mode, L"grouped") ? kGrouped : !_wcsicmp(mode, L"parallel") ? kParallel : kOff;
+    if (!mt_area(L"vehicle_logic")) g_mode = kOff; // [multithreading] vehicle_logic=0
     if (g_mode == kOff) {
-        swlog("vehicle logic: off in settings.ini ([vehicle_logic] mode=parallel to run vehicles on several threads)");
+        swlog("vehicle logic: off (multithreaded vehicle logic off, or [vehicle_logic] mode=off); the game's loop");
         return true;
     }
     g_min_vehicles = static_cast<int>(GetPrivateProfileIntW(L"vehicle_logic", L"min_vehicles", 8, ini.c_str()));
@@ -2437,7 +2583,8 @@ bool install()
     g_vt_conn = live(kVtConnector), g_vt_dock = live(kVtDoorDock), g_vt_rope = live(kVtRopeHook);
     g_group_radios = GetPrivateProfileIntW(L"vehicle_logic", L"group_radios", 1, ini.c_str()) != 0;
     g_vt_radio = native_find_vtable("c_scene_vehicle_component_rx");
-    if (GetPrivateProfileIntW(L"vehicle_logic", L"radio_phase_parallel", 0, ini.c_str())) {
+    // [multithreading] radio (the old hidden [vehicle_logic] radio_phase_parallel only when that key is missing)
+    if (mt_area(L"radio", static_cast<int>(GetPrivateProfileIntW(L"vehicle_logic", L"radio_phase_parallel", 0, ini.c_str())))) {
         g_radio_native_phase = verified_radio_phase();
         g_group_radios = !g_radio_native_phase;
         swlog(g_radio_native_phase ?
@@ -2526,6 +2673,8 @@ bool install()
                 break;
             }
             hooked++;
+            g_sink_live[i] = a;
+            g_sink_stub[i] = stub;
             if (lua_verified && !s.new_build) {
                 // the signatures' address must be the unit lua_gate found by pattern, or the two disagree: off
                 if (s.addr == kLuaCaller) g_lua_sink = a == lua_gate::caller() ? i : -2;
@@ -2544,13 +2693,16 @@ bool install()
                 g_lua_alloc = lua_gate::alloc_fn();
                 if (!g_lua_hook || !g_lua_alloc || !lua_gate::patch(&vl_lua_cfunc, &g_lua_active)) why = "the Lua C-function call couldn't be patched";
             }
+            if (!why && !(g_core_module = module_of(reinterpret_cast<uintptr_t>(swml()))))
+                why = "the SWML core module isn't known (its clock hook can't be told from another one)";
             g_lua_on = !why;
             if (why) {
                 std::fill(std::begin(g_lua_obs_off), std::end(g_lua_obs_off), uint16_t(0));
                 swlog("vehicle logic: Lua unlocked: off (%s); microcontroller Lua stays under the lock", why);
             } else {
-                swlog("vehicle logic: Lua unlocked: %zu audited code units verified; onTick runs without the lock, any other C function"
-                      " or VM takes it (fail closed)", lua_gate::unit_count());
+                swlog("vehicle logic: Lua unlocked: %zu audited code units verified (build %08x); onTick runs without the lock, any"
+                      " other C function takes it, every Lua entry holds its VM's token; the code is compared again each tick once"
+                      " hooks are on (fail closed)", lua_gate::unit_count(), game_build());
             }
         } else if (lua_wanted) {
             swlog("vehicle logic: Lua unlocked: off (verification failed, see above); microcontroller Lua stays under the lock");
