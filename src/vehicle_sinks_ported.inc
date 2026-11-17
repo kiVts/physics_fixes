@@ -10,10 +10,10 @@
 {0x140429b60, "c_scene_vehicle_component_weapon::scalar_deleting_destructor", kAlways, 0, true},
 {0x14042cfd0, "FUN_14042a7e0", kWriter, 0, true},
 {0x14077afd0, "c_client_to_server_request_play_equipment_sfx (network event)", kAlways, 0, true},
-{0x1408f8910, "c_server_to_client_event_purchase_fuel_from_vehicle (network event)", kAlways, 0, true}, // new-build network event installer
-{0x1408f8f30, "c_server_to_client_event_offset_vehicle::c_server_to_client_event_offset_vehicle", kAlways, 0, true},
-{0x1408f8fe0, "c_server_to_client_event_offset_object (network event)", kAlways, 0, true}, // new-build network event installer
-{0x1408f92b0, "c_server_to_client_event_set_map_vehicle_popup::c_server_to_client_event_set_map_vehicle_p", kAlways, 0, true},
-{0x1408f93c0, "c_server_to_client_event_set_vehicle_team::c_server_to_client_event_set_vehicle_team", kAlways, 0, true},
-{0x1408f9580, "c_server_to_client_event_place_bomb (network event)", kAlways, 0, true}, // new-build network event installer
-{0x1408f96f0, "c_server_to_client_event_activate_radar_detector (network event)", kAlways, 0, true}, // new-build network event installer
+{0x1408f8c80, "c_server_to_client_event_purchase_fuel_from_vehicle (network event)", kAlways, 0, true}, // new-build network event installer
+{0x1408f92a0, "c_server_to_client_event_offset_vehicle::c_server_to_client_event_offset_vehicle", kAlways, 0, true},
+{0x1408f9350, "c_server_to_client_event_offset_object (network event)", kAlways, 0, true}, // new-build network event installer
+{0x1408f9620, "c_server_to_client_event_set_map_vehicle_popup::c_server_to_client_event_set_map_vehicle_p", kAlways, 0, true},
+{0x1408f9730, "c_server_to_client_event_set_vehicle_team::c_server_to_client_event_set_vehicle_team", kAlways, 0, true},
+{0x1408f98f0, "c_server_to_client_event_place_bomb (network event)", kAlways, 0, true}, // new-build network event installer
+{0x1408f9a60, "c_server_to_client_event_activate_radar_detector (network event)", kAlways, 0, true}, // new-build network event installer

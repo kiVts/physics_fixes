@@ -18,7 +18,8 @@ namespace {
 constexpr uintptr_t kJumpTable = 0x1408639dc, kCase94 = 0x14086113a, kCaseDone = 0x14085b184, kApplyMessages = 0x14085aeb0;
 constexpr int kType = 0x94;
 constexpr uintptr_t kFindVehicle = 0x140549fc0, kVehicleValid = 0x140546af0;
-size_t game_vehicles() { return per_build<size_t>(0x16a48, 0x16a50); }
+size_t g_game_vehicles = 0;
+size_t game_vehicles() { return g_game_vehicles; }
 constexpr size_t kMsgVehicleId = 0x10, kVehicleBodies = 8, kBodyComponents = 0x3f0;
 constexpr size_t kCompCastSlot = 0x118, kRadarDef = 0x58, kDefType = 0xe70, kRadarFlag = 0x6d8;
 constexpr int kRadarType = 0x38;
@@ -224,9 +225,15 @@ bool install()
         swlog("radar msgs: off in settings.ini");
         return true;
     }
+    g_game_vehicles = game_field("game", 0x16a48);
+    if (!g_game_vehicles) {
+        swlog("radar msgs: the game object's vehicle table can't be located on this build; off");
+        return true;
+    }
     uintptr_t base = game_base();
     // translate the table, then index it (only the table's start is in the port table)
-    // build 0x6ae218ec inserted a message type before it: the radar message is 0x95 there
+    // The message number differs between builds. On a later build this guess is checked against the ported case
+    // address below, so a renumbered message switches the part off.
     const int type = per_build(kType, kType + 1);
     auto entry = reinterpret_cast<uint32_t*>(game_ptr<uint8_t*>(kJumpTable) + (type - 1) * 4);
     if (*entry != static_cast<uint32_t>(game_live(kCase94) - base)) {

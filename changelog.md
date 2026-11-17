@@ -1,3 +1,5 @@
+0.26.13: Supports Stormworks v1.15.27; adds optional parallel radio processing.
+
 0.26.12: Fix seabed memory leaks and audio profiler freezes.
 
 0.26.11: Prevent audio profiler freezes and excessive memory usage.

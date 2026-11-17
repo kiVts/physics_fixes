@@ -43,6 +43,8 @@ swml_add_mod(physics_fixes SOURCES
   src/render_mt.cpp
   src/serialize.cpp
   src/update_loop_sleep.cpp
+  src/lua_tick.cpp
+  src/lua_gate.cpp
   src/sound_profiler.cpp
   src/seabed_query.cpp
   src/render_refs.cpp

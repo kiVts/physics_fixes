@@ -11,6 +11,9 @@
 #include "far_logic.h"
 #include "logic_trace_bridge.h"
 #include "resolve.h"
+#include "radio_phase_contract.h"
+#include "lua_tick_contract.h"
+#include "lua_gate.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -245,6 +248,7 @@ struct WrapFrame {
     int sink;
     bool sticky;
     uint64_t t0;
+    bool nolock = false; // a microcontroller onTick running without the lock (lua_gate.h)
 };
 constexpr int kMaxDepth = 64;
 thread_local WrapFrame tl_frames[kMaxDepth];
@@ -259,6 +263,17 @@ constexpr uintptr_t kWorldFromList = 0x16a68, kWorldSize = 845799;
 
 std::atomic<uint64_t> g_sink_calls[kNumSinks], g_sink_cycles[kNumSinks], g_sticky_by_sink[kNumSinks], g_sticky_n_by_sink[kNumSinks], g_upgrades_by_sink[kNumSinks];
 std::atomic<uint64_t> g_wait_cycles{0}, g_overflow{0}, g_sticky_holds{0}, g_sticky_cycles{0}, g_cond_free{0}, g_shared_calls{0}, g_upgrades{0};
+bool g_profile_waits = false;
+std::atomic<uint64_t> g_sink_wait_cycles[kNumSinks], g_sink_waits[kNumSinks];
+
+void record_wait(int sink, uint64_t cycles)
+{
+    g_wait_cycles += cycles;
+    if (g_profile_waits) {
+        g_sink_wait_cycles[sink].fetch_add(cycles, std::memory_order_relaxed);
+        g_sink_waits[sink].fetch_add(1, std::memory_order_relaxed);
+    }
+}
 
 // Known shared queues: count before / after each outermost locked call, attributed to the running vehicle.
 struct Queue {
@@ -408,17 +423,17 @@ bool spin_try(Try try_fn)
     return false;
 }
 
-void acquire_exclusive_raw()
+void acquire_exclusive_raw(int sink)
 {
     uint64_t t0 = __rdtsc();
     if (!g_reader_lock) {
         if (!TryEnterCriticalSection(&g_world_cs)) {
             EnterCriticalSection(&g_world_cs);
-            g_wait_cycles += __rdtsc() - t0;
+            record_wait(sink, __rdtsc() - t0);
         }
     } else if (!TryAcquireSRWLockExclusive(&g_world_lock)) {
         if (!spin_try([] { return TryAcquireSRWLockExclusive(&g_world_lock) != 0; })) AcquireSRWLockExclusive(&g_world_lock);
-        g_wait_cycles += __rdtsc() - t0;
+        record_wait(sink, __rdtsc() - t0);
     }
     for (Queue& q : g_queues) q.at_enter = q_count(q); // only exclusive holders append
 }
@@ -428,13 +443,13 @@ void lock_acquire(bool exclusive, int sink)
     exclusive = exclusive || !g_reader_lock;
     if (tl_mode == kUnlocked) {
         if (exclusive) {
-            acquire_exclusive_raw();
+            acquire_exclusive_raw(sink);
             tl_mode = kExclusive;
         } else {
             uint64_t t0 = __rdtsc();
             if (!TryAcquireSRWLockShared(&g_world_lock)) {
                 if (!spin_try([] { return TryAcquireSRWLockShared(&g_world_lock) != 0; })) AcquireSRWLockShared(&g_world_lock);
-                g_wait_cycles += __rdtsc() - t0;
+                record_wait(sink, __rdtsc() - t0);
             }
             tl_mode = kShared;
         }
@@ -447,7 +462,7 @@ void lock_acquire(bool exclusive, int sink)
         g_upgrades++;
         g_upgrades_by_sink[sink].fetch_add(1, std::memory_order_relaxed);
         ReleaseSRWLockShared(&g_world_lock);
-        acquire_exclusive_raw();
+        acquire_exclusive_raw(sink);
         tl_mode = kExclusive;
     }
     tl_count++;
@@ -468,13 +483,193 @@ void lock_release()
 
 uintptr_t sink_arg(const uintptr_t* ret_slot, int n) { return n <= 4 ? ret_slot[-n] : ret_slot[n]; }
 
+constexpr uintptr_t kLuaCaller = 0x1403894d0, kLuaHttpTail = 0x1402e4d40; // both wrapped sinks (vehicle_*sinks.inc)
+struct LuaObs {
+    uintptr_t addr;
+    uint16_t l_offset; // where the sink's object keeps the lua_State
+};
+const LuaObs kLuaObs[] = {
+    {0x1401e1e80, 8},     {0x1401e1eb0, 8},
+    {0x1402e4cb0, 8},     {0x1402e5230, 8},     {0x1402e5c40, 8},
+    {0x14032be50, 8},     {0x14032c8d0, 8},
+    {0x1403892d0, 0x668}, {0x140389410, 0x668}, {0x1403896c0, 0x668}, {0x1403897d0, 0x668},
+};
+bool g_lua_on = false;
+int g_lua_sink = -1, g_http_tail_sink = -1;
+uintptr_t g_lua_hook = 0, g_lua_alloc = 0;
+std::atomic<int> g_lua_active{0}; // threads inside an unlocked onTick (gates the C-function check)
+thread_local bool tl_lua = false;
+thread_local uintptr_t tl_lua_L = 0, tl_lua_G = 0;
+thread_local int tl_nolock_frames = 0; // nolock frames on tl_frames (0 or 1)
+std::atomic<uint64_t> g_lua_free{0}, g_lua_free_cycles{0}, g_lua_went_locked{0}, g_lua_foreign{0}, g_lua_pre_locked{0},
+    g_lua_conflicts{0}, g_lua_tail_locked{0}, g_lua_other_conflicts{0};
+constexpr int kLuaLockFns = 32; // which C functions made scripts take the lock: the first 32 distinct ones
+std::atomic<uintptr_t> g_lua_lock_fn[kLuaLockFns];
+std::atomic<uint64_t> g_lua_lock_fn_n[kLuaLockFns], g_lua_lock_fn_other{0};
+std::atomic<int> g_lua_logged{0};
+uint16_t g_lua_obs_off[kNumSinks] = {};
+
+// VM ownership: global_State pointers in use by unlocked onTicks, in 64 small striped sets
+struct TokenStripe {
+    SRWLOCK lock = SRWLOCK_INIT;
+    uintptr_t g[8] = {};
+};
+TokenStripe g_tokens[64];
+TokenStripe& token_stripe(uintptr_t G) { return g_tokens[((G >> 4) ^ (G >> 12)) & 63]; }
+
+// false: the VM is in use on another thread (clash = true) or the stripe is full; the caller runs locked
+bool token_take(uintptr_t G, bool& clash)
+{
+    TokenStripe& s = token_stripe(G);
+    AcquireSRWLockExclusive(&s.lock);
+    int free_i = -1;
+    clash = false;
+    for (int i = 0; i < 8; i++) {
+        if (s.g[i] == G) clash = true;
+        else if (!s.g[i] && free_i < 0) free_i = i;
+    }
+    const bool ok = !clash && free_i >= 0;
+    if (ok) s.g[free_i] = G;
+    ReleaseSRWLockExclusive(&s.lock);
+    return ok;
+}
+
+void token_drop(uintptr_t G)
+{
+    TokenStripe& s = token_stripe(G);
+    AcquireSRWLockExclusive(&s.lock);
+    for (uintptr_t& g : s.g)
+        if (g == G) {
+            g = 0;
+            break;
+        }
+    ReleaseSRWLockExclusive(&s.lock);
+}
+
+bool token_held(uintptr_t G)
+{
+    TokenStripe& s = token_stripe(G);
+    AcquireSRWLockShared(&s.lock);
+    bool held = std::find(std::begin(s.g), std::end(s.g), G) != std::end(s.g);
+    ReleaseSRWLockShared(&s.lock);
+    return held;
+}
+
+// another Lua entry (create / compile / close / save / editor) on a VM an unlocked onTick is running: log it.
+// Those entries keep their own lock; this only reports what the unit model says can't happen.
+uintptr_t lua_state_of(uintptr_t obj, uint16_t off)
+{
+    __try {
+        const uintptr_t L = rd<uintptr_t>(obj + off);
+        return L ? rd<uintptr_t>(L + 0x18) : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+void lua_note_other(int sink, uintptr_t obj)
+{
+    const uintptr_t G = lua_state_of(obj, g_lua_obs_off[sink]);
+    if (!G || !token_held(G)) return;
+    g_lua_other_conflicts.fetch_add(1, std::memory_order_relaxed);
+    if (g_lua_logged.fetch_add(1) < 20)
+        swlog("vehicle logic: %s ran on a Lua VM (%llx) while an unlocked onTick used it on another thread", kSinks[sink].name,
+              static_cast<unsigned long long>(G));
+}
+
+bool lua_enter_unlocked(uintptr_t* ret_slot, int sink)
+{
+    if (tl_mode != kUnlocked || tl_lua || tl_depth >= kMaxDepth) return false; // already under the lock: as before
+    const uintptr_t comp = ret_slot[-1];
+    const uintptr_t L = rd<uintptr_t>(comp + 0x668);
+    const uintptr_t G = L ? rd<uintptr_t>(L + 0x18) : 0;
+    const uintptr_t hook = L ? rd<uintptr_t>(L + 0xa8) : 0;
+    if (!G || rd<uintptr_t>(G) != g_lua_alloc || rd<uintptr_t>(G + 0xc8) != L || (hook && hook != g_lua_hook)) {
+        g_lua_pre_locked.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    bool clash = false;
+    if (!token_take(G, clash)) {
+        if (clash) {
+            g_lua_conflicts.fetch_add(1, std::memory_order_relaxed);
+            if (g_lua_logged.fetch_add(1) < 20)
+                swlog("vehicle logic: Lua VM %llx entered by two threads at once (component %llx); this onTick runs under the lock",
+                      static_cast<unsigned long long>(G), static_cast<unsigned long long>(comp));
+        } else {
+            g_lua_pre_locked.fetch_add(1, std::memory_order_relaxed);
+        }
+        return false;
+    }
+    tl_lua = true;
+    tl_lua_L = L;
+    tl_lua_G = G;
+    g_lua_active.fetch_add(1, std::memory_order_relaxed); // read by this thread's own checks (program order)
+    tl_frames[tl_depth++] = WrapFrame{*ret_slot, sink, false, __rdtsc(), true};
+    tl_nolock_frames++;
+    *ret_slot = reinterpret_cast<uintptr_t>(g_post_stub);
+    return true;
+}
+
+void lua_leave_unlocked(const WrapFrame& fr)
+{
+    tl_nolock_frames--;
+    tl_lua = false;
+    token_drop(tl_lua_G);
+    tl_lua_L = tl_lua_G = 0;
+    g_lua_active.fetch_sub(1, std::memory_order_relaxed);
+    g_lua_free.fetch_add(1, std::memory_order_relaxed);
+    g_lua_free_cycles.fetch_add(__rdtsc() - fr.t0, std::memory_order_relaxed);
+}
+
+void lua_note_lock_fn(uintptr_t f)
+{
+    for (int i = 0; i < kLuaLockFns; i++) {
+        uintptr_t cur = g_lua_lock_fn[i].load(std::memory_order_relaxed);
+        if (!cur && g_lua_lock_fn[i].compare_exchange_strong(cur, f)) cur = f;
+        if (cur == f) {
+            g_lua_lock_fn_n[i].fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+    g_lua_lock_fn_other.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Before every Lua C function call while g_lua_active != 0 (lua_gate::patch)
+extern "C" void __fastcall vl_lua_cfunc(uintptr_t L, uintptr_t f)
+{
+    if (!tl_lua || tl_mode != kUnlocked) return; // not an unlocked onTick, or the lock is held already
+    if (L == tl_lua_L && lua_gate::allowed(f)) return;
+    // fail closed: the rest of this component tick under the lock
+    lock_acquire(true, g_lua_sink);
+    tl_sticky = true;
+    tl_sticky_t0 = __rdtsc();
+    tl_sticky_sink = g_lua_sink;
+    g_sticky_holds++;
+    (L == tl_lua_L ? g_lua_went_locked : g_lua_foreign).fetch_add(1, std::memory_order_relaxed);
+    lua_note_lock_fn(f);
+}
+
 extern "C" void __fastcall vl_sink_enter(uintptr_t* ret_slot, int sink)
 {
     if (!tl_par || tl_sticky) return; // tl_sticky: the exclusive lock is held until the tick returns already
+    bool force_exclusive = false;
+    if (g_lua_on) {
+        if (sink == g_lua_sink) {
+            if (lua_enter_unlocked(ret_slot, sink)) return;
+            // runs locked as before (kAlways)
+        } else if (sink == g_http_tail_sink && tl_lua) {
+            const uintptr_t script = ret_slot[-1];
+            if (!rd<uint32_t>(script + 0x38) && !rd<uint32_t>(script + 0x50)) return;
+            g_lua_tail_locked.fetch_add(1, std::memory_order_relaxed);
+            force_exclusive = true;
+        } else if (g_lua_obs_off[sink]) {
+            lua_note_other(sink, ret_slot[-1]);
+        }
+    }
     if (g_sink_is_ray[sink] && g_ray_patched && !g_iso_lock_rays) return; // per-thread ray stack: no lock needed
     const Sink& sk = kSinks[sink];
     if (sink == g_sensor_sink && tl_mode == kUnlocked && sensor_scan_unlocked(ret_slot)) return;
-    SinkKind kind = sk.kind;
+    SinkKind kind = force_exclusive ? kAlways : sk.kind;
     bool exclusive = true;
     if (kind != kAlways) {
         bool world = in_world(ret_slot[-1]);
@@ -493,7 +688,7 @@ extern "C" void __fastcall vl_sink_enter(uintptr_t* ret_slot, int sink)
     }
     // keep the lock to the end of the tick: a push helper may hand out a slot; a resize called from unlocked code
     // is followed by its caller's unlocked fill
-    bool sticky = kind == kQueue || (kind == kResize && tl_depth == 0);
+    bool sticky = kind == kQueue || (kind == kResize && tl_depth == tl_nolock_frames); // no locked frame below: unlocked caller
     if (tl_depth >= kMaxDepth) {
         // no frame left: take the exclusive lock and keep it for the rest of the tick
         g_overflow++;
@@ -512,7 +707,11 @@ extern "C" void __fastcall vl_sink_enter(uintptr_t* ret_slot, int sink)
 extern "C" uintptr_t __fastcall vl_sink_leave()
 {
     WrapFrame fr = tl_frames[--tl_depth];
-    if (tl_depth == 0) {
+    if (fr.nolock) {
+        lua_leave_unlocked(fr); // no lock to release; a lock a C function took stays tl_sticky until the tick ends
+        return fr.ret;
+    }
+    if (tl_depth == tl_nolock_frames) {
         g_sink_calls[fr.sink].fetch_add(1, std::memory_order_relaxed);
         g_sink_cycles[fr.sink].fetch_add(__rdtsc() - fr.t0, std::memory_order_relaxed);
     }
@@ -646,8 +845,12 @@ struct Link {
 };
 uint64_t g_link_unions[3], g_rope_unresolved; // this tick
 std::vector<Link> g_links;
+// Conservative antenna grouping remains the default. On the verified native build, antenna ticks update their own
+// endpoints; the world exchanges signals after the vehicle loops have finished. The opt-in phase contract permits
+// separate antenna units while leaving that serial exchange untouched. Connector, dock and rope unions still apply.
 uintptr_t g_vt_radio = 0;
 bool g_group_radios = true;
+bool g_radio_native_phase = false;
 uint64_t g_radio_vehicles = 0; // this tick
 int g_radio_logged = 0;
 constexpr size_t kComponentState = 8;
@@ -684,6 +887,8 @@ struct Unit {
 };
 std::vector<Unit> g_units;
 std::vector<int> g_order; // units, costliest first
+bool g_profile_groups = false;
+std::vector<uint64_t> g_vehicle_cycles;
 
 int find(int a)
 {
@@ -702,7 +907,7 @@ void build_units()
     g_links.clear();
     g_parent.resize(g_veh.size());
     int rope_first = -1, radio_first = -1;
-    const uintptr_t vt_radio = g_group_radios ? g_vt_radio : 0, vt_mc = g_vt_mc;
+    const uintptr_t vt_radio = g_group_radios || g_radio_native_phase ? g_vt_radio : 0, vt_mc = g_vt_mc;
     g_radio_vehicles = 0;
     g_damaged = g_damaged_mc = 0;
     for (int v = 0; v < static_cast<int>(g_veh.size()); v++) {
@@ -734,13 +939,12 @@ void build_units()
         if (radio) {
             g_radio_vehicles++;
             if (radio_first < 0) radio_first = v; // lower indices are initialised: uniting here is safe
-            else unite(radio_first, v);
+            else if (g_group_radios) unite(radio_first, v);
         }
     }
-    if (g_radio_vehicles >= 2 && static_cast<int>(g_radio_vehicles) > g_radio_logged) {
+    if (g_group_radios && g_radio_vehicles >= 2 && static_cast<int>(g_radio_vehicles) > g_radio_logged) {
         g_radio_logged = static_cast<int>(g_radio_vehicles);
-        swlog("vehicle logic: %d vehicles with radio antennas run as one group, in the game's order (a receiver must see what a"
-              " sender wrote the same way every tick)",
+        swlog("vehicle logic: %d vehicles with radio antennas run as one conservative group, in the game's order",
               g_radio_logged);
     }
     std::sort(g_links.begin(), g_links.end(), [](const Link& a, const Link& b) { return a.comp < b.comp; });
@@ -801,8 +1005,10 @@ void run_unit(Unit& u)
     uint64_t t0 = __rdtsc();
     for (int v : u.vehicles) {
         tl_vehicle = v;
+        const uint64_t vehicle_start = g_profile_groups && g_job != 0x33 ? __rdtsc() : 0;
         if (g_job == 0x33) run_vehicle33(g_veh[v].entry, g_veh[v].veh, &g_acc[v]);
         else run_vehicle(g_veh[v].entry, g_veh[v].veh);
+        if (vehicle_start) g_vehicle_cycles[v] = __rdtsc() - vehicle_start;
     }
     release_sticky();
     tl_vehicle = -1;
@@ -912,6 +1118,41 @@ uint64_t g_window_tsc = 0;
 
 const char* mode_name(Mode m) { return m == kSerial ? "serial" : m == kGrouped ? "grouped" : m == kParallel ? "parallel" : "off"; }
 
+void log_group_profile(double cyc_ms)
+{
+    if (!g_profile_groups || g_vehicle_cycles.size() != g_veh.size() || g_units.empty()) return;
+    std::vector<size_t> order(g_units.size());
+    uint64_t total = 0, biggest = 0;
+    for (size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+        total += g_units[i].cycles;
+        biggest = std::max(biggest, g_units[i].cycles);
+    }
+    const int workers = g_st.mode == kParallel ? g_threads + 1 : 1;
+    swlog("logic groups latest tick: %.3f thread-ms, largest unit %.3f ms, ideal lower bound %.3f ms on %d threads (includes waits)",
+          total / cyc_ms, biggest / cyc_ms, std::max(double(biggest), double(total) / workers) / cyc_ms, workers);
+    const size_t count = std::min<size_t>(5, order.size());
+    std::partial_sort(order.begin(), order.begin() + count, order.end(),
+                      [](size_t a, size_t b) { return g_units[a].cycles > g_units[b].cycles; });
+    for (size_t rank = 0; rank < count; ++rank) {
+        const Unit& unit = g_units[order[rank]];
+        std::string ids;
+        for (size_t i = 0; i < std::min<size_t>(8, unit.vehicles.size()); ++i)
+            ids += (i ? "," : "") + std::to_string(g_veh[unit.vehicles[i]].id);
+        swlog("  logic group #%zu: %.3f ms, %zu vehicles, cost %d, member ids [%s%s]", rank + 1,
+              unit.cycles / cyc_ms, unit.vehicles.size(), unit.cost, ids.c_str(), unit.vehicles.size() > 8 ? ",..." : "");
+    }
+    order.resize(g_veh.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    const size_t vehicles = std::min<size_t>(8, order.size());
+    std::partial_sort(order.begin(), order.begin() + vehicles, order.end(),
+                      [](size_t a, size_t b) { return g_vehicle_cycles[a] > g_vehicle_cycles[b]; });
+    for (size_t rank = 0; rank < vehicles; ++rank) {
+        const size_t v = order[rank];
+        swlog("  logic vehicle #%zu: id %u, %.3f ms, cost %d", rank + 1, g_veh[v].id, g_vehicle_cycles[v] / cyc_ms, g_veh[v].cost);
+    }
+}
+
 void log_lod(uint64_t t, double cyc_ms);
 void count_far_work();
 void log_far_work(double t, double cyc_ms);
@@ -934,11 +1175,12 @@ void maybe_log(Mode m)
               " grouping %.3f ms), %.0f vehicles in %.0f units (largest %.0f vehicles)",
               mode_name(g_st.mode), g_st.mode == kParallel ? g_threads + 1 : 1, g_st.ticks / secs, g_st.original / secs, g_st.cycles / cyc_ms / t,
               g_st.unit_cycles / cyc_ms / t, g_st.group_cycles / cyc_ms / t, double(g_st.vehicles) / t, double(g_st.units) / t, double(g_st.largest) / t);
+        if (g_st.mode >= kGrouped) log_group_profile(cyc_ms);
         if (g_st.mode >= kGrouped)
             swlog("  groups formed by: %.1f connector links, %.1f dock links, %.1f rope links, %.1f rope hooks with an unknown partner (kept"
-                  " together), %.1f vehicles with radio antennas (one group); raycasts %s",
+                  " together), %.1f vehicles with radio antennas (%s); raycasts %s",
                   double(g_st.unions[0]) / t, double(g_st.unions[1]) / t, double(g_st.unions[2]) / t, double(g_st.rope_unresolved) / t,
-                  double(g_st.radio_vehicles) / t,
+                  double(g_st.radio_vehicles) / t, g_radio_native_phase ? "native serial exchange after logic" : "one group",
                   !g_ray_patched ? "under the lock" : g_iso_lock_rays ? "under the lock (isolate stage)" : "in parallel (per-thread ray stack)");
         if (g_st.mode >= kGrouped && g_st.damaged)
             swlog("  damage: %.1f components in a damaged state per tick, %.1f of them microcontrollers (state 1 runs some ticks only and"
@@ -956,6 +1198,28 @@ void maybe_log(Mode m)
                   " vehicle's own queues ran unlocked; %.0f/tick read-only calls shared the lock (%.1f/tick had to switch to exclusive)",
                   double(g_sticky_holds.load()) / t, g_sticky_cycles.load() / cyc_ms / t, double(g_cond_free.load()) / t,
                   double(g_shared_calls.load()) / t, double(g_upgrades.load()) / t);
+            if (g_lua_on) {
+                swlog("  Lua unlocked: %.0f/tick onTick calls started without the lock (%.2f thread-ms/tick); %.1f/tick then took it for an"
+                      " unaudited C function, %.1f/tick for a call on another VM; %.1f/tick ran locked from the start (VM check), %.1f/tick"
+                      " HTTP tails locked; VM conflicts: %llu onTick + %llu other entries (both must stay 0)",
+                      double(g_lua_free.exchange(0)) / t, g_lua_free_cycles.exchange(0) / cyc_ms / t, double(g_lua_went_locked.exchange(0)) / t,
+                      double(g_lua_foreign.exchange(0)) / t, double(g_lua_pre_locked.exchange(0)) / t, double(g_lua_tail_locked.exchange(0)) / t,
+                      static_cast<unsigned long long>(g_lua_conflicts.load()), static_cast<unsigned long long>(g_lua_other_conflicts.load()));
+                std::vector<int> lf;
+                for (int i = 0; i < kLuaLockFns; i++)
+                    if (g_lua_lock_fn_n[i].load()) lf.push_back(i);
+                std::sort(lf.begin(), lf.end(), [](int a, int b) { return g_lua_lock_fn_n[a].load() > g_lua_lock_fn_n[b].load(); });
+                for (size_t k = 0; k < std::min<size_t>(6, lf.size()); k++) {
+                    const uintptr_t f = g_lua_lock_fn[lf[k]].load();
+                    const char* nm = lua_gate::name_of(f);
+                    swlog("    Lua took the lock for: %6.1f/tick  %s (%llx)", double(g_lua_lock_fn_n[lf[k]].load()) / t, nm ? nm : "unnamed C function",
+                          static_cast<unsigned long long>(f));
+                }
+                if (g_lua_lock_fn_other.load())
+                    swlog("    Lua took the lock for: %6.1f/tick  other C functions", double(g_lua_lock_fn_other.load()) / t);
+                for (int i = 0; i < kLuaLockFns; i++) g_lua_lock_fn_n[i] = 0;
+                g_lua_lock_fn_other = 0;
+            }
             if (g_snap_on)
                 swlog("  sensor lists: %.0f/tick scans ran unlocked on per-tick copies, %.0f/tick locked (list not copied yet); copies"
                       " checked after the loop: %llu grew (seen next tick), %llu changed otherwise; %llu dead sources skipped",
@@ -970,6 +1234,21 @@ void maybe_log(Mode m)
             for (size_t k = 0; k < nt; k++)
                 swlog("    %6.3f ms/tick  %7.1f calls/tick  %llx %s", g_sink_cycles[top[k]].load() / cyc_ms / t, double(g_sink_calls[top[k]].load()) / t,
                       static_cast<unsigned long long>(kSinks[top[k]].addr), kSinks[top[k]].name);
+            if (g_profile_waits) {
+                std::vector<int> waiting;
+                for (int i = 0; i < kNumSinks; ++i)
+                    if (g_sink_wait_cycles[i].load()) waiting.push_back(i);
+                const size_t count = std::min<size_t>(8, waiting.size());
+                std::partial_sort(waiting.begin(), waiting.begin() + count, waiting.end(),
+                                  [](int a, int b) { return g_sink_wait_cycles[a].load() > g_sink_wait_cycles[b].load(); });
+                for (size_t k = 0; k < count; ++k) {
+                    const int i = waiting[k];
+                    swlog("    wait requesting: %6.3f thread-ms/tick  %7.1f waits/tick  %llx %s",
+                          g_sink_wait_cycles[i].load() / cyc_ms / t, double(g_sink_waits[i].load()) / t,
+                          static_cast<unsigned long long>(kSinks[i].addr), kSinks[i].name);
+                }
+                for (int i = 0; i < kNumSinks; ++i) g_sink_wait_cycles[i] = 0, g_sink_waits[i] = 0;
+            }
             std::vector<int> st;
             for (int i = 0; i < kNumSinks; i++)
                 if (g_sticky_by_sink[i].load()) st.push_back(i);
@@ -1801,6 +2080,7 @@ extern "C" int __fastcall vl_run(uintptr_t rbp, uintptr_t r13, uintptr_t rdi, ui
             return 0;
         }
         g_st.group_cycles += __rdtsc() - tg;
+        if (g_profile_groups) g_vehicle_cycles.assign(g_veh.size(), 0);
         trace_batch(r13,uint32_t(mode),0,uint32_t(g_veh.size()),uint32_t(g_units.size()));
         lod_decide_raw();
         lod_publish_physics();
@@ -2072,9 +2352,42 @@ uint8_t* alloc_near(uintptr_t target, size_t size)
     return nullptr;
 }
 
+bool verified_radio_phase()
+{
+    const radio_phase::Audited* audited = radio_phase::audited_for(game_build());
+    if (!audited || !g_vt_radio) return false;
+    __try {
+        const uintptr_t base = game_base();
+        const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+        const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+        const uintptr_t end = base + nt->OptionalHeader.SizeOfImage;
+        const auto loop = game_ptr<const uint8_t*>(0x140549240);
+        if (!loop || reinterpret_cast<uintptr_t>(loop) < base ||
+            reinterpret_cast<uintptr_t>(loop) + radio_phase::tail_offset + radio_phase::tail_size > end) return false;
+        const uint8_t* call = loop + radio_phase::call_offset;
+        if (*call != 0xe8) return false;
+        int32_t displacement = 0;
+        memcpy(&displacement, call + 1, sizeof displacement);
+        const uintptr_t mixer = reinterpret_cast<uintptr_t>(call + 5) + displacement;
+        const uintptr_t antenna = reinterpret_cast<const uintptr_t*>(g_vt_radio)[107];
+        if (mixer < base || mixer > end || radio_phase::mixer_size > end - mixer ||
+            antenna < base || antenna > end || radio_phase::antenna_size > end - antenna) return false;
+        return radio_phase::matches(*audited, loop + radio_phase::tail_offset,
+                                    reinterpret_cast<const uint8_t*>(mixer), reinterpret_cast<const uint8_t*>(antenna));
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
 bool install()
 {
+    // [vehicle_logic] lua_unlocked: the checked code is hashed before this mod patches or hooks anything (lua_tick below
+    // rewrites part of the onTick caller, the sink wrappers hook it and the HTTP tail)
+    const bool lua_wanted = GetPrivateProfileIntW(L"vehicle_logic", L"lua_unlocked", 0, std::wstring(settings_ini()).c_str()) != 0;
+    const bool lua_verified = lua_wanted && lua_gate::verify();
+    lua_tick::install();
     std::wstring ini = settings_ini();
+    g_profile_groups = GetPrivateProfileIntW(L"probes", L"enabled", 0, ini.c_str()) != 0;
+    g_profile_waits = g_profile_groups;
+    if (g_profile_waits) swlog("vehicle logic: per-function lock-wait profiling on; waits attributed to the requesting function");
     wchar_t mode[32];
     GetPrivateProfileStringW(L"vehicle_logic", L"mode", L"parallel", mode, 32, ini.c_str());
     g_mode = !_wcsicmp(mode, L"serial") ? kSerial : !_wcsicmp(mode, L"grouped") ? kGrouped : !_wcsicmp(mode, L"parallel") ? kParallel : kOff;
@@ -2124,9 +2437,15 @@ bool install()
     g_vt_conn = live(kVtConnector), g_vt_dock = live(kVtDoorDock), g_vt_rope = live(kVtRopeHook);
     g_group_radios = GetPrivateProfileIntW(L"vehicle_logic", L"group_radios", 1, ini.c_str()) != 0;
     g_vt_radio = native_find_vtable("c_scene_vehicle_component_rx");
-    if (!g_group_radios) {
-        swlog("vehicle logic: vehicles with radio antennas are NOT kept together ([vehicle_logic] group_radios=0): a receiver may"
-              " read a sender on another thread");
+    if (GetPrivateProfileIntW(L"vehicle_logic", L"radio_phase_parallel", 0, ini.c_str())) {
+        g_radio_native_phase = verified_radio_phase();
+        g_group_radios = !g_radio_native_phase;
+        swlog(g_radio_native_phase ?
+              "vehicle logic: native radio phase verified; independent antenna vehicles run in parallel; serial signal exchange retained" :
+              "vehicle logic: native radio phase could not be verified; antenna vehicles remain grouped");
+    }
+    if (!g_group_radios && !g_radio_native_phase) {
+        swlog("vehicle logic: antenna grouping disabled without a verified native radio phase ([vehicle_logic] group_radios=0)");
     } else if (!g_vt_radio && g_mode >= kGrouped) {
         // No way to tell which vehicles talk over radio: units would run them apart. One thread in list order instead.
         swlog("vehicle logic: the radio antenna class wasn't found on this build; running serial (the game's order on one thread)"
@@ -2207,6 +2526,34 @@ bool install()
                 break;
             }
             hooked++;
+            if (lua_verified && !s.new_build) {
+                // the signatures' address must be the unit lua_gate found by pattern, or the two disagree: off
+                if (s.addr == kLuaCaller) g_lua_sink = a == lua_gate::caller() ? i : -2;
+                else if (s.addr == kLuaHttpTail) g_http_tail_sink = a == lua_gate::http_tail() ? i : -2;
+                else
+                    for (const LuaObs& o : kLuaObs)
+                        if (s.addr == o.addr) g_lua_obs_off[i] = o.l_offset;
+            }
+        }
+        if (lua_verified) {
+            const char* why = g_mode < kGrouped ? "the sink wrappers aren't active" : g_isolate_s > 0 ? "isolate_s is on"
+                            : g_lua_sink < 0 || g_http_tail_sink < 0 ? "the onTick caller / HTTP tail wrappers don't match the verified code"
+                            : nullptr;
+            if (!why) {
+                g_lua_hook = lua_gate::timeout_hook();
+                g_lua_alloc = lua_gate::alloc_fn();
+                if (!g_lua_hook || !g_lua_alloc || !lua_gate::patch(&vl_lua_cfunc, &g_lua_active)) why = "the Lua C-function call couldn't be patched";
+            }
+            g_lua_on = !why;
+            if (why) {
+                std::fill(std::begin(g_lua_obs_off), std::end(g_lua_obs_off), uint16_t(0));
+                swlog("vehicle logic: Lua unlocked: off (%s); microcontroller Lua stays under the lock", why);
+            } else {
+                swlog("vehicle logic: Lua unlocked: %zu audited code units verified; onTick runs without the lock, any other C function"
+                      " or VM takes it (fail closed)", lua_gate::unit_count());
+            }
+        } else if (lua_wanted) {
+            swlog("vehicle logic: Lua unlocked: off (verification failed, see above); microcontroller Lua stays under the lock");
         }
         FlushInstructionCache(GetCurrentProcess(), mem, p - mem);
         swlog("vehicle logic: %d shared-system functions wrapped, %d skipped, %d original-build ones gone in this build "
